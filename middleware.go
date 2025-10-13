@@ -1,7 +1,6 @@
 package caddydefender
 
 import (
-	"bufio"
 	"fmt"
 	"net"
 	"net/http"

@@ -25,7 +25,7 @@ type IPRangeFetcher interface {
 }
 
 func init() {
-	caddy.RegisterModule(DefenderAdmin{})
+	caddy.RegisterModule(&DefenderAdmin{})
 }
 
 // DefenderAdmin is an App module that provides admin API routes for managing Defender
