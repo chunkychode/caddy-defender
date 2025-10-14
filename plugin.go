@@ -37,8 +37,9 @@ var (
 	defaultTarpitResponseCode = http.StatusOK
 
 	// globalRateLimiter is the singleton rate limiter instance shared across all Defender instances
-	globalRateLimiter   *ratelimit.Tracker
-	globalRateLimiterMu sync.RWMutex
+	globalRateLimiter         *ratelimit.Tracker
+	globalRateLimiterMu       sync.RWMutex
+	globalRateLimiterRefCount int // Tracks how many Defender instances are using the rate limiter
 )
 
 // Defender implements an HTTP middleware that enforces IP-based rules to protect your site from AIs/Scrapers.
@@ -222,6 +223,9 @@ func (m *Defender) Provision(ctx caddy.Context) error {
 		} else {
 			m.log.Info("Using existing global rate limiter instance")
 		}
+		globalRateLimiterRefCount++
+		m.log.Debug("Rate limiter reference count incremented",
+			zap.Int("ref_count", globalRateLimiterRefCount))
 		globalRateLimiterMu.Unlock()
 	}
 
@@ -236,14 +240,31 @@ func (Defender) CaddyModule() caddy.ModuleInfo {
 	}
 }
 
-// Cleanup closes the file watcher if it exists
-// Note: Global rate limiter is NOT stopped here since it's shared across instances
+// Cleanup closes the file watcher and decrements the rate limiter reference count
 func (m *Defender) Cleanup() error {
 	if m.fileFetcher != nil {
 		if err := m.fileFetcher.Close(); err != nil {
 			return err
 		}
 	}
+
+	// Decrement global rate limiter reference count and stop it when last instance cleans up
+	if m.RateLimitConfig.Enabled {
+		globalRateLimiterMu.Lock()
+		globalRateLimiterRefCount--
+		m.log.Debug("Rate limiter reference count decremented",
+			zap.Int("ref_count", globalRateLimiterRefCount))
+
+		// Stop the rate limiter when the last instance is cleaned up
+		if globalRateLimiterRefCount <= 0 && globalRateLimiter != nil {
+			m.log.Info("Stopping global rate limiter (last instance cleaned up)")
+			globalRateLimiter.Stop()
+			globalRateLimiter = nil
+			globalRateLimiterRefCount = 0 // Ensure it doesn't go negative
+		}
+		globalRateLimiterMu.Unlock()
+	}
+
 	return nil
 }
 
