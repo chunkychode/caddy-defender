@@ -468,14 +468,19 @@ func (d *DefenderAdmin) handleRateLimitStats(w http.ResponseWriter, r *http.Requ
 		}
 	}
 
-	if defender.rateLimitTracker == nil {
+	// Access the global rate limiter (singleton)
+	globalRateLimiterMu.RLock()
+	tracker := globalRateLimiter
+	globalRateLimiterMu.RUnlock()
+
+	if tracker == nil {
 		return caddy.APIError{
 			HTTPStatus: http.StatusBadRequest,
 			Message:    "rate limiting not enabled",
 		}
 	}
 
-	stats := defender.rateLimitTracker.GetStats()
+	stats := tracker.GetStats()
 
 	response := map[string]interface{}{
 		"enabled":       defender.RateLimitConfig.Enabled,
@@ -484,6 +489,7 @@ func (d *DefenderAdmin) handleRateLimitStats(w http.ResponseWriter, r *http.Requ
 		"window":        defender.RateLimitConfig.WindowDuration.String(),
 		"tracked_count": len(stats),
 		"tracked_ips":   stats,
+		"note":          "Rate limiting is global across all Defender instances",
 	}
 
 	w.Header().Set("Content-Type", "application/json")
@@ -492,14 +498,6 @@ func (d *DefenderAdmin) handleRateLimitStats(w http.ResponseWriter, r *http.Requ
 
 // handleRateLimitReset resets rate limiting tracking for a specific IP
 func (d *DefenderAdmin) handleRateLimitReset(w http.ResponseWriter, r *http.Request) error {
-	defender := d.getDefender()
-	if defender == nil {
-		return caddy.APIError{
-			HTTPStatus: http.StatusServiceUnavailable,
-			Message:    "no defender instances available",
-		}
-	}
-
 	if r.Method != http.MethodDelete {
 		return caddy.APIError{
 			HTTPStatus: http.StatusMethodNotAllowed,
@@ -507,7 +505,12 @@ func (d *DefenderAdmin) handleRateLimitReset(w http.ResponseWriter, r *http.Requ
 		}
 	}
 
-	if defender.rateLimitTracker == nil {
+	// Access the global rate limiter (singleton)
+	globalRateLimiterMu.RLock()
+	tracker := globalRateLimiter
+	globalRateLimiterMu.RUnlock()
+
+	if tracker == nil {
 		return caddy.APIError{
 			HTTPStatus: http.StatusBadRequest,
 			Message:    "rate limiting not enabled",
@@ -525,7 +528,7 @@ func (d *DefenderAdmin) handleRateLimitReset(w http.ResponseWriter, r *http.Requ
 		}
 	}
 
-	reset := defender.rateLimitTracker.ResetIP(ip)
+	reset := tracker.ResetIP(ip)
 	if !reset {
 		return caddy.APIError{
 			HTTPStatus: http.StatusNotFound,

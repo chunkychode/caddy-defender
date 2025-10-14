@@ -3,6 +3,7 @@ package caddydefender
 import (
 	"fmt"
 	"net/http"
+	"sync"
 	"time"
 
 	"github.com/caddyserver/caddy/v2"
@@ -34,6 +35,10 @@ var (
 	defaultTarpitBytesPerSecond = 24
 	// defaultTarpitResponseCode is the default HTTP respond code for the tarpit responder.
 	defaultTarpitResponseCode = http.StatusOK
+
+	// globalRateLimiter is the singleton rate limiter instance shared across all Defender instances
+	globalRateLimiter   *ratelimit.Tracker
+	globalRateLimiterMu sync.RWMutex
 )
 
 // Defender implements an HTTP middleware that enforces IP-based rules to protect your site from AIs/Scrapers.
@@ -121,10 +126,8 @@ type Defender struct {
 	// RateLimitConfig configures automatic blocking based on HTTP status codes (e.g., 404s)
 	// When enabled, IPs exceeding the threshold are automatically added to the blocklist
 	// Default: disabled
+	// NOTE: Rate limiting is global across all Defender instances
 	RateLimitConfig ratelimit.Config `json:"rate_limit_config,omitempty"`
-
-	// rateLimitTracker is the internal rate limit tracker instance
-	rateLimitTracker *ratelimit.Tracker
 }
 
 // Provision sets up the middleware, logger, and responder configurations.
@@ -206,13 +209,20 @@ func (m *Defender) Provision(ctx caddy.Context) error {
 		}
 	}
 
-	// Initialize rate limiter if enabled
+	// Initialize global rate limiter if enabled and not already initialized
+	// This is shared across ALL Defender instances for global rate limiting
 	if m.RateLimitConfig.Enabled {
-		m.rateLimitTracker = ratelimit.NewTracker(m.RateLimitConfig, m.log)
-		m.log.Info("Rate limiter enabled",
-			zap.Ints("status_codes", m.RateLimitConfig.StatusCodes),
-			zap.Int("max_requests", m.RateLimitConfig.MaxRequests),
-			zap.Duration("window", m.RateLimitConfig.WindowDuration))
+		globalRateLimiterMu.Lock()
+		if globalRateLimiter == nil {
+			globalRateLimiter = ratelimit.NewTracker(m.RateLimitConfig, m.log)
+			m.log.Info("Global rate limiter initialized (singleton)",
+				zap.Ints("status_codes", m.RateLimitConfig.StatusCodes),
+				zap.Int("max_requests", m.RateLimitConfig.MaxRequests),
+				zap.Duration("window", m.RateLimitConfig.WindowDuration))
+		} else {
+			m.log.Info("Using existing global rate limiter instance")
+		}
+		globalRateLimiterMu.Unlock()
 	}
 
 	return nil
@@ -226,15 +236,13 @@ func (Defender) CaddyModule() caddy.ModuleInfo {
 	}
 }
 
-// Cleanup closes the file watcher and rate limiter if they exist
+// Cleanup closes the file watcher if it exists
+// Note: Global rate limiter is NOT stopped here since it's shared across instances
 func (m *Defender) Cleanup() error {
 	if m.fileFetcher != nil {
 		if err := m.fileFetcher.Close(); err != nil {
 			return err
 		}
-	}
-	if m.rateLimitTracker != nil {
-		m.rateLimitTracker.Stop()
 	}
 	return nil
 }

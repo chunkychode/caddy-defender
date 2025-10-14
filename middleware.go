@@ -72,7 +72,11 @@ func (m Defender) ServeHTTP(w http.ResponseWriter, r *http.Request, next caddyht
 
 	// Wrap response writer to capture status code for rate limiting
 	var recorder *ratelimit.ResponseRecorder
-	if m.rateLimitTracker != nil {
+	globalRateLimiterMu.RLock()
+	rateLimiterEnabled := globalRateLimiter != nil
+	globalRateLimiterMu.RUnlock()
+
+	if rateLimiterEnabled {
 		recorder = ratelimit.NewResponseRecorder(w)
 		w = recorder
 	}
@@ -81,8 +85,12 @@ func (m Defender) ServeHTTP(w http.ResponseWriter, r *http.Request, next caddyht
 	err = next.ServeHTTP(w, r)
 
 	// Track the request for rate limiting if enabled
-	if m.rateLimitTracker != nil && recorder != nil {
-		exceeded, trackErr := m.rateLimitTracker.TrackRequest(clientIP, recorder.StatusCode)
+	if rateLimiterEnabled && recorder != nil {
+		globalRateLimiterMu.RLock()
+		tracker := globalRateLimiter
+		globalRateLimiterMu.RUnlock()
+
+		exceeded, trackErr := tracker.TrackRequest(clientIP, recorder.StatusCode)
 		if trackErr != nil {
 			m.log.Error("Failed to track request for rate limiting",
 				zap.String("ip", clientIP.String()),
