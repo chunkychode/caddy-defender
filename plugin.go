@@ -76,7 +76,9 @@ var (
 // - `drop`: Drops the connection
 // - `garbage`: Respond with random garbage data
 // - `redirect`: Redirect requests to a URL with 308 permanent redirect
-// - `tarpit`: Stream data at a slow, but configurable rate to stall bots and pollute AI training.
+// - `tarpit`: Stream data at a slow, but configurable rate to stall bots and pollute AI training
+//
+// For built-in rate limiting based on status codes, see the `rate_limit_config` option.
 //
 // For a list of predefined ranges, see the [readme]
 // [readme]: https://github.com/JasonLovesDoggo/caddy-defender#embedded-ip-ranges

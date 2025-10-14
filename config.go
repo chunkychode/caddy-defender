@@ -21,7 +21,7 @@ import (
 	"pkg.jsn.cam/caddy-defender/responders/tarpit"
 )
 
-var responderTypes = []string{"block", "custom", "drop", "garbage", "ratelimit", "redirect", "tarpit"}
+var responderTypes = []string{"block", "custom", "drop", "garbage", "redirect", "tarpit"}
 
 // UnmarshalCaddyfile sets up the handler from Caddyfile tokens. Syntax:
 //
@@ -238,8 +238,6 @@ func (m *Defender) UnmarshalJSON(b []byte) error {
 		m.responder = &responders.DropResponder{}
 	case "garbage":
 		m.responder = &responders.GarbageResponder{}
-	case "ratelimit":
-		m.responder = &responders.RateLimitResponder{}
 	case "redirect":
 		m.URL = rawConfig.URL
 		m.responder = &responders.RedirectResponder{
