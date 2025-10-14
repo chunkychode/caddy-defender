@@ -39,8 +39,14 @@ func NewTracker(config Config, log *zap.Logger) *Tracker {
 	t.wg.Add(1)
 	go t.cleanupLoop()
 
+	trackingMode := "specific status codes"
+	if len(config.StatusCodes) == 0 {
+		trackingMode = "ALL requests"
+	}
+
 	t.log.Info("Rate limiter initialized",
 		zap.Bool("enabled", config.Enabled),
+		zap.String("tracking_mode", trackingMode),
 		zap.Ints("status_codes", config.StatusCodes),
 		zap.Int("max_requests", config.MaxRequests),
 		zap.Duration("window_duration", config.WindowDuration))
@@ -50,13 +56,15 @@ func NewTracker(config Config, log *zap.Logger) *Tracker {
 
 // TrackRequest tracks a request and returns true if the rate limit was exceeded
 // This should be called AFTER the request has been processed to know the status code
+// If StatusCodes is empty, ALL requests are tracked regardless of status code
 func (t *Tracker) TrackRequest(clientIP net.IP, statusCode int) (exceeded bool, err error) {
 	if !t.config.Enabled {
 		return false, nil
 	}
 
-	// Check if this status code should be tracked
-	if !t.shouldTrackStatus(statusCode) {
+	// If StatusCodes is empty, track all requests
+	// Otherwise, check if this status code should be tracked
+	if len(t.config.StatusCodes) > 0 && !t.shouldTrackStatus(statusCode) {
 		return false, nil
 	}
 

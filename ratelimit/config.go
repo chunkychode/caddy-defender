@@ -8,6 +8,7 @@ type Config struct {
 	Enabled bool `json:"enabled"`
 
 	// StatusCodes defines which HTTP status codes to track (e.g., [404])
+	// If empty, ALL requests are tracked regardless of status code
 	// Default: [404]
 	StatusCodes []int `json:"status_codes,omitempty"`
 
@@ -44,9 +45,9 @@ func DefaultConfig() Config {
 func (c *Config) ApplyDefaults() {
 	defaults := DefaultConfig()
 
-	if len(c.StatusCodes) == 0 {
-		c.StatusCodes = defaults.StatusCodes
-	}
+	// Don't auto-apply status codes - let empty mean "track all"
+	// Users must explicitly set to [404] or leave empty for "all"
+	// We only apply defaults for other fields
 	if c.MaxRequests == 0 {
 		c.MaxRequests = defaults.MaxRequests
 	}
