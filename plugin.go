@@ -39,7 +39,8 @@ var (
 	// globalRateLimiter is the singleton rate limiter instance shared across all Defender instances
 	globalRateLimiter         *ratelimit.Tracker
 	globalRateLimiterMu       sync.RWMutex
-	globalRateLimiterRefCount int // Tracks how many Defender instances are using the rate limiter
+	globalRateLimiterRefCount int              // Tracks how many Defender instances are using the rate limiter
+	globalRateLimiterConfig   *ratelimit.Config // Stores the config from the first instance for comparison
 )
 
 // Defender implements an HTTP middleware that enforces IP-based rules to protect your site from AIs/Scrapers.
@@ -215,13 +216,25 @@ func (m *Defender) Provision(ctx caddy.Context) error {
 	if m.RateLimitConfig.Enabled {
 		globalRateLimiterMu.Lock()
 		if globalRateLimiter == nil {
+			// First instance - initialize the rate limiter
 			globalRateLimiter = ratelimit.NewTracker(m.RateLimitConfig, m.log)
+			globalRateLimiterConfig = &m.RateLimitConfig
 			m.log.Info("Global rate limiter initialized (singleton)",
 				zap.Ints("status_codes", m.RateLimitConfig.StatusCodes),
 				zap.Int("max_requests", m.RateLimitConfig.MaxRequests),
 				zap.Duration("window", m.RateLimitConfig.WindowDuration))
 		} else {
+			// Subsequent instance - check if config matches
 			m.log.Info("Using existing global rate limiter instance")
+			if !configsMatch(globalRateLimiterConfig, &m.RateLimitConfig) {
+				m.log.Warn("Rate limiter config differs from first instance - using first instance's config",
+					zap.Ints("first_status_codes", globalRateLimiterConfig.StatusCodes),
+					zap.Int("first_max_requests", globalRateLimiterConfig.MaxRequests),
+					zap.Duration("first_window", globalRateLimiterConfig.WindowDuration),
+					zap.Ints("this_status_codes", m.RateLimitConfig.StatusCodes),
+					zap.Int("this_max_requests", m.RateLimitConfig.MaxRequests),
+					zap.Duration("this_window", m.RateLimitConfig.WindowDuration))
+			}
 		}
 		globalRateLimiterRefCount++
 		m.log.Debug("Rate limiter reference count incremented",
@@ -230,6 +243,38 @@ func (m *Defender) Provision(ctx caddy.Context) error {
 	}
 
 	return nil
+}
+
+// configsMatch compares two rate limit configs to check if they're equivalent
+func configsMatch(c1, c2 *ratelimit.Config) bool {
+	if c1 == nil || c2 == nil {
+		return c1 == c2
+	}
+
+	// Compare basic fields
+	if c1.MaxRequests != c2.MaxRequests ||
+		c1.WindowDuration != c2.WindowDuration ||
+		c1.AutoAddToBlocklist != c2.AutoAddToBlocklist ||
+		c1.CleanupInterval != c2.CleanupInterval {
+		return false
+	}
+
+	// Compare status code slices
+	if len(c1.StatusCodes) != len(c2.StatusCodes) {
+		return false
+	}
+	// Create a map for easier comparison
+	statusMap := make(map[int]bool)
+	for _, code := range c1.StatusCodes {
+		statusMap[code] = true
+	}
+	for _, code := range c2.StatusCodes {
+		if !statusMap[code] {
+			return false
+		}
+	}
+
+	return true
 }
 
 // CaddyModule returns the Caddy module information.
@@ -260,6 +305,7 @@ func (m *Defender) Cleanup() error {
 			m.log.Info("Stopping global rate limiter (last instance cleaned up)")
 			globalRateLimiter.Stop()
 			globalRateLimiter = nil
+			globalRateLimiterConfig = nil
 			globalRateLimiterRefCount = 0 // Ensure it doesn't go negative
 		}
 		globalRateLimiterMu.Unlock()
