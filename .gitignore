@@ -32,3 +32,4 @@ caddy
 
 # mkdocs bulit site directory
 site/
+.claude/settings.local.json
