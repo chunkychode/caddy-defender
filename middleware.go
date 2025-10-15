@@ -103,9 +103,12 @@ func (m Defender) ServeHTTP(w http.ResponseWriter, r *http.Request, next caddyht
 					zap.String("ip", clientIP.String()),
 					zap.Error(addErr))
 			} else {
-				m.log.Info("Added IP to blocklist due to rate limit violation",
+				m.log.Info("Rate limit exceeded - IP added to blocklist",
 					zap.String("ip", clientIP.String()),
-					zap.Int("status_code", recorder.StatusCode))
+					zap.String("blocklist_file", m.BlocklistFile),
+					zap.Int("status_code", recorder.StatusCode),
+					zap.Int("max_requests", m.RateLimitConfig.MaxRequests),
+					zap.Duration("window", m.RateLimitConfig.WindowDuration))
 
 				// Block this request immediately (Option A)
 				return m.responder.ServeHTTP(recorder.ResponseWriter, r, next)
