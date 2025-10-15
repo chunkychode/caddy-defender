@@ -283,6 +283,12 @@ func TestIPChecker_IsWhitelisted(t *testing.T) {
 			testIP:        "173.164.175.106",
 			expected:      true,
 		},
+		{
+			name:          "IPv4-mapped IPv6 matches IPv4 whitelist entry",
+			whitelistedIPs: []string{"192.168.100.108"},
+			testIP:        "192.168.100.108",
+			expected:      true,
+		},
 	}
 
 	for _, tt := range tests {

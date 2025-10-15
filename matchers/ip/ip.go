@@ -79,8 +79,14 @@ func (c *IPChecker) ReqAllowed(ctx context.Context, clientIP net.IP) bool {
 		return false
 	}
 
+	// Normalize IPv4-mapped IPv6 addresses to IPv4 for whitelist check
+	normalizedIP := ipAddr
+	if ipAddr.Is4In6() {
+		normalizedIP = netip.AddrFrom4(ipAddr.As4())
+	}
+
 	// Check if the IP is whitelisted
-	if ok, _ := c.whitelist.Matches(ipAddr); ok {
+	if ok, _ := c.whitelist.Matches(normalizedIP); ok {
 		c.log.Debug("IP is whitelisted", zap.String("ip", clientIP.String()))
 		return true
 	}
@@ -98,7 +104,17 @@ func (c *IPChecker) IsWhitelisted(clientIP net.IP) bool {
 		return false
 	}
 
+	// Normalize IPv4-mapped IPv6 addresses to IPv4
+	// This ensures "::ffff:192.168.1.1" matches "192.168.1.1" in the whitelist
+	if ipAddr.Is4In6() {
+		ipAddr = netip.AddrFrom4(ipAddr.As4())
+	}
+
 	ok, _ := c.whitelist.Matches(ipAddr)
+	c.log.Debug("Whitelist check",
+		zap.String("ip", clientIP.String()),
+		zap.String("normalized_ip", ipAddr.String()),
+		zap.Bool("is_whitelisted", ok))
 	return ok
 }
 
