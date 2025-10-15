@@ -215,13 +215,29 @@ func (d *DefenderAdmin) handleAddToBlocklist(w http.ResponseWriter, r *http.Requ
 		}
 	}
 
-	// Validate IPs are in CIDR format
-	for _, ip := range req.IPs {
-		if !strings.Contains(ip, "/") {
+	// Validate IPs are in CIDR format and check against whitelist
+	var whitelistedIPs []string
+	for _, ipCIDR := range req.IPs {
+		if !strings.Contains(ipCIDR, "/") {
 			return caddy.APIError{
 				HTTPStatus: http.StatusBadRequest,
-				Message:    fmt.Sprintf("IP must be in CIDR format (e.g., %s/32): %s", ip, ip),
+				Message:    fmt.Sprintf("IP must be in CIDR format (e.g., %s/32): %s", ipCIDR, ipCIDR),
 			}
+		}
+
+		// Extract the IP address from CIDR (e.g., "192.168.1.1/32" -> "192.168.1.1")
+		ipStr := strings.Split(ipCIDR, "/")[0]
+		clientIP := net.ParseIP(ipStr)
+		if clientIP != nil && m.ipChecker.IsWhitelisted(clientIP) {
+			whitelistedIPs = append(whitelistedIPs, ipCIDR)
+		}
+	}
+
+	// Reject the request if any IPs are whitelisted
+	if len(whitelistedIPs) > 0 {
+		return caddy.APIError{
+			HTTPStatus: http.StatusForbidden,
+			Message:    fmt.Sprintf("cannot add whitelisted IPs to blocklist: %v", whitelistedIPs),
 		}
 	}
 

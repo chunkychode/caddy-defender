@@ -87,7 +87,8 @@ func (m Defender) ServeHTTP(w http.ResponseWriter, r *http.Request, next caddyht
 	err = next.ServeHTTP(w, r)
 
 	// Track the request for rate limiting if enabled
-	if tracker != nil && recorder != nil {
+	// Skip rate limiting for whitelisted IPs
+	if tracker != nil && recorder != nil && !m.ipChecker.IsWhitelisted(clientIP) {
 		exceeded, trackErr := tracker.TrackRequest(clientIP, recorder.StatusCode)
 		if trackErr != nil {
 			m.log.Error("Failed to track request for rate limiting",
@@ -110,6 +111,9 @@ func (m Defender) ServeHTTP(w http.ResponseWriter, r *http.Request, next caddyht
 				return m.responder.ServeHTTP(recorder.ResponseWriter, r, next)
 			}
 		}
+	} else if tracker != nil && recorder != nil {
+		m.log.Debug("Skipping rate limiting for whitelisted IP",
+			zap.String("ip", clientIP.String()))
 	}
 
 	return err

@@ -88,6 +88,20 @@ func (c *IPChecker) ReqAllowed(ctx context.Context, clientIP net.IP) bool {
 	return !c.IPInRanges(ctx, ipAddr)
 }
 
+// IsWhitelisted checks if an IP address is in the whitelist
+func (c *IPChecker) IsWhitelisted(clientIP net.IP) bool {
+	ipAddr, err := ipToAddr(clientIP)
+	if err != nil {
+		c.log.Warn("Invalid IP address format in whitelist check",
+			zap.String("ip", clientIP.String()),
+			zap.Error(err))
+		return false
+	}
+
+	ok, _ := c.whitelist.Matches(ipAddr)
+	return ok
+}
+
 func (c *IPChecker) IPInRanges(ctx context.Context, ipAddr netip.Addr) bool {
 	// Convert to netip.Addr first to handle IPv4-mapped IPv6 addresses
 	// Use the normalized string representation for cache keys
