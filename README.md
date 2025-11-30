@@ -61,6 +61,7 @@ The `defender` directive is used to configure the Caddy Defender plugin. It has 
 ```caddyfile
 defender <responder> {
     message <custom message>
+    status_code <http_status_code>
     ranges <ip_ranges...>
     url <url>
     blocklist_file <path>
@@ -75,7 +76,7 @@ defender <responder> {
 
 - `<responder>`: The responder backend to use. Supported values are:
   - `block`: Returns a `403 Forbidden` response.
-  - `custom`: Returns a custom message (requires `message`).
+  - `custom`: Returns a custom message with configurable status code (requires `message`, optional `status_code` defaults to 200).
   - `drop`: Drops the connection.
   - `garbage`: Returns garbage data to pollute AI training.
   - `redirect`: Returns a `308 Permanent Redirect` response (requires `url`).
@@ -83,6 +84,7 @@ defender <responder> {
   - `tarpit`: Stream data at a slow, but configurable rate to stall bots and pollute AI training.
 - `<ip_ranges...>`: An optional list of CIDR ranges or predefined range keys to match against the client's IP. Defaults to [`aws azurepubliccloud deepseek gcloud githubcopilot openai`](./plugin.go).
 - `<custom message>`: A custom message to return when using the `custom` responder.
+- `<http_status_code>`: Optional HTTP status code for the `custom` responder (defaults to 200).
 - `<url>`: The URI that the `redirect` responder would redirect to.
 - `<path>`: Path to a file containing IP addresses/CIDR ranges (one per line) to block. The file is automatically monitored for changes.
 
