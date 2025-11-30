@@ -77,6 +77,15 @@ func (m *Defender) UnmarshalCaddyfile(d *caddyfile.Dispenser) error {
 			}
 			Message := d.Val()
 			m.Message = Message
+		case "status_code":
+			if !d.NextArg() {
+				return d.ArgErr()
+			}
+			statusCode, err := strconv.Atoi(d.Val())
+			if err != nil {
+				return fmt.Errorf("invalid status_code value: '%s'", d.Val())
+			}
+			m.StatusCode = statusCode
 		case "url":
 			if !d.NextArg() {
 				return d.ArgErr()
@@ -229,10 +238,12 @@ func (m *Defender) UnmarshalJSON(b []byte) error {
 	case "block":
 		m.responder = &responders.BlockResponder{}
 	case "custom":
-		// Get the custom message
+		// Get the custom message and status code
 		m.Message = rawConfig.Message
+		m.StatusCode = rawConfig.StatusCode
 		m.responder = &responders.CustomResponder{
-			Message: m.Message,
+			Message:    m.Message,
+			StatusCode: m.StatusCode,
 		}
 	case "drop":
 		m.responder = &responders.DropResponder{}
