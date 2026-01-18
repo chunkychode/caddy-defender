@@ -16,11 +16,12 @@ import (
 	"github.com/caddyserver/caddy/v2/modules/caddyhttp"
 	"pkg.jsn.cam/caddy-defender/matchers/whitelist"
 	"pkg.jsn.cam/caddy-defender/ranges/data"
+	"pkg.jsn.cam/caddy-defender/ratelimit"
 	"pkg.jsn.cam/caddy-defender/responders"
 	"pkg.jsn.cam/caddy-defender/responders/tarpit"
 )
 
-var responderTypes = []string{"block", "custom", "drop", "garbage", "ratelimit", "redirect", "tarpit"}
+var responderTypes = []string{"block", "custom", "drop", "garbage", "redirect", "tarpit"}
 
 // UnmarshalCaddyfile sets up the handler from Caddyfile tokens. Syntax:
 //
@@ -37,6 +38,15 @@ var responderTypes = []string{"block", "custom", "drop", "garbage", "ratelimit",
 //	    serve_ignore (no arguments)
 //	    # Path to file containing IP addresses/ranges to block (optional)
 //	    blocklist_file <path>
+//	    # Rate limiting configuration (optional)
+//	    rate_limit_config {
+//	        enabled
+//	        status_codes <code...>
+//	        max_requests <number>
+//	        window_duration <duration>
+//	        auto_add_to_blocklist
+//	        cleanup_interval <duration>
+//	    }
 //	}
 func (m *Defender) UnmarshalCaddyfile(d *caddyfile.Dispenser) error {
 	d.Next() // consume directive name
@@ -67,6 +77,15 @@ func (m *Defender) UnmarshalCaddyfile(d *caddyfile.Dispenser) error {
 			}
 			Message := d.Val()
 			m.Message = Message
+		case "status_code":
+			if !d.NextArg() {
+				return d.ArgErr()
+			}
+			statusCode, err := strconv.Atoi(d.Val())
+			if err != nil {
+				return fmt.Errorf("invalid status_code value: '%s'", d.Val())
+			}
+			m.StatusCode = statusCode
 		case "url":
 			if !d.NextArg() {
 				return d.ArgErr()
@@ -148,6 +167,55 @@ func (m *Defender) UnmarshalCaddyfile(d *caddyfile.Dispenser) error {
 					return d.Errf("unknown nested config key: %s", d.Val())
 				}
 			}
+		case "rate_limit_config":
+			m.RateLimitConfig = ratelimit.DefaultConfig()
+			for nesting := d.Nesting(); d.NextBlock(nesting); {
+				switch d.Val() {
+				case "enabled":
+					m.RateLimitConfig.Enabled = true
+				case "status_codes":
+					var codes []int
+					for d.NextArg() {
+						code, err := strconv.Atoi(d.Val())
+						if err != nil {
+							return fmt.Errorf("invalid status code: '%s'", d.Val())
+						}
+						codes = append(codes, code)
+					}
+					m.RateLimitConfig.StatusCodes = codes
+				case "max_requests":
+					if !d.NextArg() {
+						return d.ArgErr()
+					}
+					maxReq, err := strconv.Atoi(d.Val())
+					if err != nil {
+						return fmt.Errorf("invalid max_requests value: '%s'", d.Val())
+					}
+					m.RateLimitConfig.MaxRequests = maxReq
+				case "window_duration":
+					if !d.NextArg() {
+						return d.ArgErr()
+					}
+					duration, err := time.ParseDuration(d.Val())
+					if err != nil {
+						return fmt.Errorf("invalid window_duration value: '%s'", d.Val())
+					}
+					m.RateLimitConfig.WindowDuration = duration
+				case "auto_add_to_blocklist":
+					m.RateLimitConfig.AutoAddToBlocklist = true
+				case "cleanup_interval":
+					if !d.NextArg() {
+						return d.ArgErr()
+					}
+					interval, err := time.ParseDuration(d.Val())
+					if err != nil {
+						return fmt.Errorf("invalid cleanup_interval value: '%s'", d.Val())
+					}
+					m.RateLimitConfig.CleanupInterval = interval
+				default:
+					return d.Errf("unknown rate_limit_config option: %s", d.Val())
+				}
+			}
 		default:
 			return d.Errf("unknown subdirective '%s'", d.Val())
 		}
@@ -170,17 +238,17 @@ func (m *Defender) UnmarshalJSON(b []byte) error {
 	case "block":
 		m.responder = &responders.BlockResponder{}
 	case "custom":
-		// Get the custom message
+		// Get the custom message and status code
 		m.Message = rawConfig.Message
+		m.StatusCode = rawConfig.StatusCode
 		m.responder = &responders.CustomResponder{
-			Message: m.Message,
+			Message:    m.Message,
+			StatusCode: m.StatusCode,
 		}
 	case "drop":
 		m.responder = &responders.DropResponder{}
 	case "garbage":
 		m.responder = &responders.GarbageResponder{}
-	case "ratelimit":
-		m.responder = &responders.RateLimitResponder{}
 	case "redirect":
 		m.URL = rawConfig.URL
 		m.responder = &responders.RedirectResponder{

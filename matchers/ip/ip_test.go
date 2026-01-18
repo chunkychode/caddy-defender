@@ -246,6 +246,113 @@ func TestPredefinedCIDRGroups(t *testing.T) {
 	}
 }
 
+func TestIPChecker_IsWhitelisted(t *testing.T) {
+	tests := []struct {
+		name          string
+		whitelistedIPs []string
+		testIP        string
+		expected      bool
+	}{
+		{
+			name:          "IPv4 whitelisted",
+			whitelistedIPs: []string{"192.168.1.100"},
+			testIP:        "192.168.1.100",
+			expected:      true,
+		},
+		{
+			name:          "IPv4 not whitelisted",
+			whitelistedIPs: []string{"192.168.1.100"},
+			testIP:        "192.168.1.101",
+			expected:      false,
+		},
+		{
+			name:          "IPv6 whitelisted",
+			whitelistedIPs: []string{"2001:db8::1"},
+			testIP:        "2001:db8::1",
+			expected:      true,
+		},
+		{
+			name:          "Empty whitelist",
+			whitelistedIPs: []string{},
+			testIP:        "192.168.1.100",
+			expected:      false,
+		},
+		{
+			name:          "Multiple IPs in whitelist",
+			whitelistedIPs: []string{"192.168.1.100", "10.0.0.1", "173.164.175.106"},
+			testIP:        "173.164.175.106",
+			expected:      true,
+		},
+		{
+			name:          "IPv4-mapped IPv6 matches IPv4 whitelist entry",
+			whitelistedIPs: []string{"192.168.100.108"},
+			testIP:        "192.168.100.108",
+			expected:      true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			checker := NewIPChecker([]string{}, tt.whitelistedIPs, testLogger)
+			clientIP := net.ParseIP(tt.testIP)
+			assert.NotNil(t, clientIP, "Failed to parse IP")
+
+			result := checker.IsWhitelisted(clientIP)
+			assert.Equal(t, tt.expected, result, "Unexpected whitelist result for IP %s", tt.testIP)
+		})
+	}
+}
+
+func TestIPChecker_ReqAllowed_WithWhitelist(t *testing.T) {
+	// Mock predefined CIDRs
+	originalIPRanges := data.IPRanges
+	defer func() { data.IPRanges = originalIPRanges }()
+	data.IPRanges = map[string][]string{
+		"testrange": {"192.168.1.0/24"},
+	}
+
+	tests := []struct {
+		name           string
+		whitelistedIPs []string
+		ranges         []string
+		testIP         string
+		expectedAllowed bool
+	}{
+		{
+			name:           "Whitelisted IP in blocked range should be allowed",
+			whitelistedIPs: []string{"192.168.1.100"},
+			ranges:         []string{"testrange"},
+			testIP:         "192.168.1.100",
+			expectedAllowed: true, // Whitelisted, so allowed
+		},
+		{
+			name:           "Non-whitelisted IP in blocked range should be blocked",
+			whitelistedIPs: []string{"192.168.1.100"},
+			ranges:         []string{"testrange"},
+			testIP:         "192.168.1.101",
+			expectedAllowed: false, // In blocked range, not whitelisted
+		},
+		{
+			name:           "Non-whitelisted IP not in range should be allowed",
+			whitelistedIPs: []string{"192.168.1.100"},
+			ranges:         []string{"testrange"},
+			testIP:         "10.0.0.1",
+			expectedAllowed: true, // Not in blocked range
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			checker := NewIPChecker(tt.ranges, tt.whitelistedIPs, testLogger)
+			clientIP := net.ParseIP(tt.testIP)
+			assert.NotNil(t, clientIP, "Failed to parse IP")
+
+			result := checker.ReqAllowed(context.Background(), clientIP)
+			assert.Equal(t, tt.expectedAllowed, result, "Unexpected result for IP %s", tt.testIP)
+		})
+	}
+}
+
 func TestIPChecker_UpdateRanges(t *testing.T) {
 	t.Run("UpdateWithNewRanges", func(t *testing.T) {
 		// Create IPChecker with initial ranges

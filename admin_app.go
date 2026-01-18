@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"encoding/json"
 	"fmt"
+	"net"
 	"net/http"
 	"os"
 	"strings"
@@ -25,7 +26,7 @@ type IPRangeFetcher interface {
 }
 
 func init() {
-	caddy.RegisterModule(DefenderAdmin{})
+	caddy.RegisterModule(&DefenderAdmin{})
 }
 
 // DefenderAdmin is an App module that provides admin API routes for managing Defender
@@ -119,6 +120,14 @@ func (d *DefenderAdmin) Routes() []caddy.AdminRoute {
 			Pattern: "/defender/stats",
 			Handler: caddy.AdminHandlerFunc(d.handleStats),
 		},
+		{
+			Pattern: "/defender/ratelimit/stats",
+			Handler: caddy.AdminHandlerFunc(d.handleRateLimitStats),
+		},
+		{
+			Pattern: "/defender/ratelimit/reset/*",
+			Handler: caddy.AdminHandlerFunc(d.handleRateLimitReset),
+		},
 	}
 }
 
@@ -207,13 +216,29 @@ func (d *DefenderAdmin) handleAddToBlocklist(w http.ResponseWriter, r *http.Requ
 		}
 	}
 
-	// Validate IPs are in CIDR format
-	for _, ip := range req.IPs {
-		if !strings.Contains(ip, "/") {
+	// Validate IPs are in CIDR format and check against whitelist
+	var whitelistedIPs []string
+	for _, ipCIDR := range req.IPs {
+		if !strings.Contains(ipCIDR, "/") {
 			return caddy.APIError{
 				HTTPStatus: http.StatusBadRequest,
-				Message:    fmt.Sprintf("IP must be in CIDR format (e.g., %s/32): %s", ip, ip),
+				Message:    fmt.Sprintf("IP must be in CIDR format (e.g., %s/32): %s", ipCIDR, ipCIDR),
 			}
+		}
+
+		// Extract the IP address from CIDR (e.g., "192.168.1.1/32" -> "192.168.1.1")
+		ipStr := strings.Split(ipCIDR, "/")[0]
+		clientIP := net.ParseIP(ipStr)
+		if clientIP != nil && m.ipChecker.IsWhitelisted(clientIP) {
+			whitelistedIPs = append(whitelistedIPs, ipCIDR)
+		}
+	}
+
+	// Reject the request if any IPs are whitelisted
+	if len(whitelistedIPs) > 0 {
+		return caddy.APIError{
+			HTTPStatus: http.StatusForbidden,
+			Message:    fmt.Sprintf("cannot add whitelisted IPs to blocklist: %v", whitelistedIPs),
 		}
 	}
 
@@ -441,6 +466,99 @@ func (d *DefenderAdmin) removeIPFromFile(filePath string, ipToRemove string) (bo
 		zap.String("ip", ipToRemove))
 
 	return true, nil
+}
+
+// handleRateLimitStats returns current rate limiting statistics
+func (d *DefenderAdmin) handleRateLimitStats(w http.ResponseWriter, r *http.Request) error {
+	defender := d.getDefender()
+	if defender == nil {
+		return caddy.APIError{
+			HTTPStatus: http.StatusServiceUnavailable,
+			Message:    "no defender instances available",
+		}
+	}
+
+	if r.Method != http.MethodGet {
+		return caddy.APIError{
+			HTTPStatus: http.StatusMethodNotAllowed,
+			Message:    "method not allowed",
+		}
+	}
+
+	// Access the global rate limiter (singleton)
+	globalRateLimiterMu.RLock()
+	tracker := globalRateLimiter
+	globalRateLimiterMu.RUnlock()
+
+	if tracker == nil {
+		return caddy.APIError{
+			HTTPStatus: http.StatusBadRequest,
+			Message:    "rate limiting not enabled",
+		}
+	}
+
+	stats := tracker.GetStats()
+
+	response := map[string]interface{}{
+		"enabled":       defender.RateLimitConfig.Enabled,
+		"status_codes":  defender.RateLimitConfig.StatusCodes,
+		"max_requests":  defender.RateLimitConfig.MaxRequests,
+		"window":        defender.RateLimitConfig.WindowDuration.String(),
+		"tracked_count": len(stats),
+		"tracked_ips":   stats,
+		"note":          "Rate limiting is global across all Defender instances",
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	return json.NewEncoder(w).Encode(response)
+}
+
+// handleRateLimitReset resets rate limiting tracking for a specific IP
+func (d *DefenderAdmin) handleRateLimitReset(w http.ResponseWriter, r *http.Request) error {
+	if r.Method != http.MethodDelete {
+		return caddy.APIError{
+			HTTPStatus: http.StatusMethodNotAllowed,
+			Message:    "method not allowed",
+		}
+	}
+
+	// Access the global rate limiter (singleton)
+	globalRateLimiterMu.RLock()
+	tracker := globalRateLimiter
+	globalRateLimiterMu.RUnlock()
+
+	if tracker == nil {
+		return caddy.APIError{
+			HTTPStatus: http.StatusBadRequest,
+			Message:    "rate limiting not enabled",
+		}
+	}
+
+	// Extract IP from path
+	path := strings.TrimPrefix(r.URL.Path, "/defender/ratelimit/reset/")
+	ip := strings.TrimSpace(path)
+
+	if ip == "" {
+		return caddy.APIError{
+			HTTPStatus: http.StatusBadRequest,
+			Message:    "IP address required",
+		}
+	}
+
+	reset := tracker.ResetIP(ip)
+	if !reset {
+		return caddy.APIError{
+			HTTPStatus: http.StatusNotFound,
+			Message:    fmt.Sprintf("IP not found in rate limit tracking: %s", ip),
+		}
+	}
+
+	response := map[string]interface{}{
+		"reset": ip,
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	return json.NewEncoder(w).Encode(response)
 }
 
 // Interface guards

@@ -8,6 +8,7 @@ import (
 	"go.uber.org/zap"
 
 	"github.com/caddyserver/caddy/v2/modules/caddyhttp"
+	"pkg.jsn.cam/caddy-defender/ratelimit"
 )
 
 // serveIgnore is a helper function to serve a robots.txt file if the ServeIgnore option is enabled.
@@ -61,14 +62,89 @@ func (m Defender) ServeHTTP(w http.ResponseWriter, r *http.Request, next caddyht
 		return caddyhttp.Error(http.StatusForbidden, fmt.Errorf("invalid client IP"))
 	}
 	m.log.Debug("Ranges", zap.Strings("ranges", m.Ranges))
-	// Check if the client IP is in any of the ranges using the optimized checker
-	if m.ipChecker.ReqAllowed(r.Context(), clientIP) {
-		m.log.Debug("IP is not in ranges", zap.String("ip", clientIP.String()))
-	} else {
-		m.log.Debug("IP is in ranges", zap.String("ip", clientIP.String()))
+
+	// Check if the client IP should be allowed (considering whitelist and blocked ranges)
+	if !m.ipChecker.ReqAllowed(r.Context(), clientIP) {
+		m.log.Debug("Request blocked (IP in blocked ranges and not whitelisted)", zap.String("ip", clientIP.String()))
+		// Request should be blocked
 		return m.responder.ServeHTTP(w, r, next)
 	}
 
-	// IP is not in any of the ranges, proceed to the next handler
-	return next.ServeHTTP(w, r)
+	m.log.Debug("Request allowed (IP whitelisted or not in blocked ranges)", zap.String("ip", clientIP.String()))
+
+	// Capture the rate limiter tracker pointer once to avoid race conditions
+	// If we check twice, the limiter could be stopped between checks causing nil pointer panic
+	globalRateLimiterMu.RLock()
+	tracker := globalRateLimiter
+	globalRateLimiterMu.RUnlock()
+
+	// Wrap response writer to capture status code for rate limiting
+	var recorder *ratelimit.ResponseRecorder
+	if tracker != nil {
+		recorder = ratelimit.NewResponseRecorder(w)
+		w = recorder
+	}
+
+	// IP is allowed, proceed to the next handler
+	err = next.ServeHTTP(w, r)
+
+	// Track the request for rate limiting if enabled
+	// Skip rate limiting for whitelisted IPs
+	if tracker != nil && recorder != nil && !m.ipChecker.IsWhitelisted(clientIP) {
+		exceeded, trackErr := tracker.TrackRequest(clientIP, recorder.StatusCode)
+		if trackErr != nil {
+			m.log.Error("Failed to track request for rate limiting",
+				zap.String("ip", clientIP.String()),
+				zap.Error(trackErr))
+		}
+
+		// If rate limit exceeded, add IP to blocklist
+		if exceeded && m.RateLimitConfig.AutoAddToBlocklist {
+			if addErr := m.addIPToBlocklist(clientIP); addErr != nil {
+				m.log.Error("Failed to add IP to blocklist",
+					zap.String("ip", clientIP.String()),
+					zap.Error(addErr))
+			} else {
+				m.log.Info("Rate limit exceeded - IP added to blocklist",
+					zap.String("ip", clientIP.String()),
+					zap.String("blocklist_file", m.BlocklistFile),
+					zap.Int("status_code", recorder.StatusCode),
+					zap.Int("max_requests", m.RateLimitConfig.MaxRequests),
+					zap.Duration("window", m.RateLimitConfig.WindowDuration))
+
+				// Block this request immediately (Option A)
+				return m.responder.ServeHTTP(recorder.ResponseWriter, r, next)
+			}
+		}
+	} else if tracker != nil && recorder != nil {
+		m.log.Debug("Skipping rate limiting for whitelisted IP",
+			zap.String("ip", clientIP.String()))
+	}
+
+	return err
+}
+
+// addIPToBlocklist adds an IP address to the blocklist file (if configured)
+func (m *Defender) addIPToBlocklist(clientIP net.IP) error {
+	if m.BlocklistFile == "" {
+		return fmt.Errorf("blocklist_file not configured")
+	}
+
+	// Convert IP to CIDR format
+	ipCIDR := fmt.Sprintf("%s/32", clientIP.String())
+	if clientIP.To4() == nil {
+		// IPv6
+		ipCIDR = fmt.Sprintf("%s/128", clientIP.String())
+	}
+
+	// Use the DefenderAdmin's addIPsToFile method
+	globalAdminMu.RLock()
+	admin := globalDefenderAdmin
+	globalAdminMu.RUnlock()
+
+	if admin == nil {
+		return fmt.Errorf("DefenderAdmin not available")
+	}
+
+	return admin.addIPsToFile(m.BlocklistFile, []string{ipCIDR})
 }
