@@ -62,13 +62,15 @@ func (m Defender) ServeHTTP(w http.ResponseWriter, r *http.Request, next caddyht
 		return caddyhttp.Error(http.StatusForbidden, fmt.Errorf("invalid client IP"))
 	}
 	m.log.Debug("Ranges", zap.Strings("ranges", m.Ranges))
-	// Check if the client IP is in any of the ranges using the optimized checker
-	if m.ipChecker.ReqAllowed(r.Context(), clientIP) {
-		m.log.Debug("IP is not in ranges", zap.String("ip", clientIP.String()))
-	} else {
-		m.log.Debug("IP is in ranges", zap.String("ip", clientIP.String()))
+
+	// Check if the client IP should be allowed (considering whitelist and blocked ranges)
+	if !m.ipChecker.ReqAllowed(r.Context(), clientIP) {
+		m.log.Debug("Request blocked (IP in blocked ranges and not whitelisted)", zap.String("ip", clientIP.String()))
+		// Request should be blocked
 		return m.responder.ServeHTTP(w, r, next)
 	}
+
+	m.log.Debug("Request allowed (IP whitelisted or not in blocked ranges)", zap.String("ip", clientIP.String()))
 
 	// Capture the rate limiter tracker pointer once to avoid race conditions
 	// If we check twice, the limiter could be stopped between checks causing nil pointer panic
@@ -83,7 +85,7 @@ func (m Defender) ServeHTTP(w http.ResponseWriter, r *http.Request, next caddyht
 		w = recorder
 	}
 
-	// IP is not in any of the ranges, proceed to the next handler
+	// IP is allowed, proceed to the next handler
 	err = next.ServeHTTP(w, r)
 
 	// Track the request for rate limiting if enabled

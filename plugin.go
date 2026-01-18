@@ -90,21 +90,6 @@ type Defender struct {
 	// fileFetcher is the internal file watcher for dynamic IP loading
 	fileFetcher interface{ Close() error }
 
-	// Ranges specifies IP ranges to block, which can be either:
-	// - CIDR notations (e.g., "192.168.1.0/24")
-	// - Predefined service keys (e.g., "openai", "aws")
-	// Default:
-	Ranges []string `json:"ranges,omitempty"`
-
-	// An optional whitelist of IP addresses to exclude from blocking. If empty, no IPs are whitelisted.
-	// NOTE: this only supports IP addresses, not ranges.
-	// Default: []
-	Whitelist []string `json:"whitelist,omitempty"`
-
-	// An optional configuration for the 'tarpit' responder
-	// Default: {Headers: {}, timeout: 30s, ResponseCode: 200}
-	TarpitConfig tarpit.Config `json:"tarpit_config,omitempty"`
-
 	// Message specifies the custom response message for 'custom' responder type.
 	// Required when using 'custom' responder.
 	Message string `json:"message,omitempty"`
@@ -120,6 +105,21 @@ type Defender struct {
 	// RawResponder defines the response strategy for blocked requests.
 	// Required. Must be one of: "block", "custom", "drop", "garbage", "redirect", "tarpit"
 	RawResponder string `json:"raw_responder,omitempty"`
+
+	// Ranges specifies IP ranges to block, which can be either:
+	// - CIDR notations (e.g., "192.168.1.0/24")
+	// - Predefined service keys (e.g., "openai", "aws")
+	// Default:
+	Ranges []string `json:"ranges,omitempty"`
+
+	// An optional whitelist of IP addresses to exclude from blocking. If empty, no IPs are whitelisted.
+	// NOTE: this only supports IP addresses, not ranges.
+	// Default: []
+	Whitelist []string `json:"whitelist,omitempty"`
+
+	// An optional configuration for the 'tarpit' responder
+	// Default: {Headers: {}, timeout: 30s, ResponseCode: 200}
+	TarpitConfig tarpit.Config `json:"tarpit_config,omitempty"`
 
 	// BlocklistFile specifies a path to a file containing IP addresses/ranges to block (one per line).
 	// The file is monitored for changes and automatically reloaded.
