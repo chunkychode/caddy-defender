@@ -3,7 +3,7 @@ module pkg.jsn.cam/caddy-defender
 go 1.25.5
 
 require (
-	github.com/caddyserver/caddy/v2 v2.10.2
+	github.com/caddyserver/caddy/v2 v2.11.2
 	github.com/fsnotify/fsnotify v1.8.0
 	github.com/gaissmai/bart v0.26.1
 	github.com/stretchr/testify v1.11.1
