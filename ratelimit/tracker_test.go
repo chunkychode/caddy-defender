@@ -352,12 +352,9 @@ func TestConfigApplyDefaults(t *testing.T) {
 
 	config.ApplyDefaults()
 
-	if len(config.StatusCodes) == 0 {
-		t.Error("Expected StatusCodes to have defaults applied")
-	}
-
-	if config.StatusCodes[0] != 404 {
-		t.Errorf("Expected default status code to be 404, got %d", config.StatusCodes[0])
+	// StatusCodes is intentionally not defaulted: empty means "track all".
+	if len(config.StatusCodes) != 0 {
+		t.Errorf("Expected StatusCodes to remain empty (track-all mode), got %v", config.StatusCodes)
 	}
 
 	if config.MaxRequests != 10 {

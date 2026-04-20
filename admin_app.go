@@ -7,6 +7,7 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 
@@ -36,6 +37,10 @@ type DefenderAdmin struct {
 
 	defender *Defender
 	mu       sync.RWMutex
+
+	// fileMu serializes writes to blocklist files so concurrent callers
+	// (admin API + rate-limit auto-add) cannot race on os.Rename/os.Create.
+	fileMu sync.Mutex
 }
 
 // CaddyModule returns the Caddy module information
@@ -365,100 +370,175 @@ func (d *DefenderAdmin) handleStats(w http.ResponseWriter, r *http.Request) erro
 	return json.NewEncoder(w).Encode(response)
 }
 
-// addIPsToFile appends IPs to the blocklist file
+// defaultBlocklistMode is the permission mode applied to a newly-created
+// blocklist file. Peer processes (backup, fail2ban, log tooling) commonly run
+// under a different UID and need read access, so we default to world-readable.
+const defaultBlocklistMode os.FileMode = 0644
+
+// addIPsToFile ensures the given IPs are present in the blocklist file.
+//
+// The file's original contents (comments, blank lines, and existing order) are
+// preserved verbatim; new entries are appended at the bottom. Entries that are
+// already present are silent no-ops. A missing file is treated as a fresh
+// deploy and is created on the first write.
 func (d *DefenderAdmin) addIPsToFile(filePath string, ips []string) error {
-	// Read existing IPs
-	existingIPs := make(map[string]bool)
-	if file, err := os.Open(filePath); err == nil {
+	d.fileMu.Lock()
+	defer d.fileMu.Unlock()
+
+	existing := make(map[string]struct{})
+	var lines []string
+
+	file, err := os.Open(filePath)
+	switch {
+	case err == nil:
+		defer file.Close()
 		scanner := bufio.NewScanner(file)
+		// Raise the per-line limit so an unusually long comment doesn't
+		// silently truncate the scan.
+		scanner.Buffer(make([]byte, 0, 64*1024), 1024*1024)
 		for scanner.Scan() {
-			line := strings.TrimSpace(scanner.Text())
-			if line != "" && !strings.HasPrefix(line, "#") {
-				existingIPs[line] = true
+			raw := scanner.Text()
+			lines = append(lines, raw)
+			trimmed := strings.TrimSpace(raw)
+			if trimmed != "" && !strings.HasPrefix(trimmed, "#") {
+				existing[trimmed] = struct{}{}
 			}
 		}
-		file.Close()
-	}
-
-	// Add new IPs
-	for _, ip := range ips {
-		existingIPs[ip] = true
-	}
-
-	// Write all IPs back to file
-	file, err := os.Create(filePath)
-	if err != nil {
-		return fmt.Errorf("failed to open file: %w", err)
-	}
-	defer file.Close()
-
-	writer := bufio.NewWriter(file)
-	for ip := range existingIPs {
-		if _, err := writer.WriteString(ip + "\n"); err != nil {
-			return fmt.Errorf("failed to write IP: %w", err)
+		if err := scanner.Err(); err != nil {
+			return fmt.Errorf("failed to read blocklist file: %w", err)
 		}
+	case os.IsNotExist(err):
+		// Fresh deploy: no file yet. Fall through and create it.
+	default:
+		return fmt.Errorf("failed to open blocklist file: %w", err)
 	}
 
-	if err := writer.Flush(); err != nil {
-		return fmt.Errorf("failed to flush writer: %w", err)
+	added := make([]string, 0, len(ips))
+	for _, ip := range ips {
+		if _, ok := existing[ip]; ok {
+			continue
+		}
+		existing[ip] = struct{}{}
+		lines = append(lines, ip)
+		added = append(added, ip)
+	}
+
+	if len(added) == 0 {
+		return nil
+	}
+
+	if err := writeBlocklistAtomic(filePath, lines); err != nil {
+		return err
 	}
 
 	d.log.Info("Added IPs to blocklist file",
 		zap.String("file", filePath),
-		zap.Strings("ips", ips))
+		zap.Strings("ips", added))
 
 	return nil
 }
 
-// removeIPFromFile removes an IP from the blocklist file
+// writeBlocklistAtomic writes the given lines to filePath atomically: write to
+// a sibling temp file, fsync, chmod to match the existing file's mode, then
+// rename over the target. This prevents the file watcher from observing a
+// half-written file and preserves peer-process read access across rewrites.
+//
+// Lines are written verbatim (no modification, one per line). Cleanup of the
+// temp file is deferred so a panic or future early return cannot leak it.
+func writeBlocklistAtomic(filePath string, lines []string) (retErr error) {
+	dir := filepath.Dir(filePath)
+	tmp, err := os.CreateTemp(dir, filepath.Base(filePath)+".tmp-*")
+	if err != nil {
+		return fmt.Errorf("failed to create temp file: %w", err)
+	}
+	tmpName := tmp.Name()
+
+	closed := false
+	defer func() {
+		if !closed {
+			_ = tmp.Close()
+		}
+		// After a successful Rename the temp name no longer points at a file;
+		// the Remove returns ENOENT and is harmless. On any failure path, the
+		// temp file is cleaned up here rather than left behind.
+		_ = os.Remove(tmpName)
+	}()
+
+	writer := bufio.NewWriter(tmp)
+	for _, line := range lines {
+		if _, err := writer.WriteString(line + "\n"); err != nil {
+			return fmt.Errorf("failed to write line: %w", err)
+		}
+	}
+	if err := writer.Flush(); err != nil {
+		return fmt.Errorf("failed to flush writer: %w", err)
+	}
+	if err := tmp.Sync(); err != nil {
+		return fmt.Errorf("failed to fsync temp file: %w", err)
+	}
+
+	// Match the permission mode of the existing file so peer processes keep
+	// their access after rewrite. os.CreateTemp produces 0600, which would
+	// otherwise silently lock out a non-owner reader on the first rewrite.
+	mode := defaultBlocklistMode
+	if info, err := os.Stat(filePath); err == nil {
+		mode = info.Mode().Perm()
+	} else if !os.IsNotExist(err) {
+		return fmt.Errorf("failed to stat target: %w", err)
+	}
+	if err := tmp.Chmod(mode); err != nil {
+		return fmt.Errorf("failed to chmod temp file: %w", err)
+	}
+
+	if err := tmp.Close(); err != nil {
+		return fmt.Errorf("failed to close temp file: %w", err)
+	}
+	closed = true
+
+	if err := os.Rename(tmpName, filePath); err != nil {
+		return fmt.Errorf("failed to rename temp file into place: %w", err)
+	}
+	return nil
+}
+
+// removeIPFromFile removes an IP from the blocklist file, preserving all
+// surrounding lines (comments, blanks, other IPs) verbatim. Returns
+// (found=false, nil) if the IP isn't present, or if the file doesn't exist.
 func (d *DefenderAdmin) removeIPFromFile(filePath string, ipToRemove string) (bool, error) {
-	// Read existing IPs
-	ips := make([]string, 0)
-	found := false
+	d.fileMu.Lock()
+	defer d.fileMu.Unlock()
 
 	file, err := os.Open(filePath)
 	if err != nil {
-		return false, fmt.Errorf("failed to open file: %w", err)
+		if os.IsNotExist(err) {
+			return false, nil
+		}
+		return false, fmt.Errorf("failed to open blocklist file: %w", err)
 	}
+	defer file.Close()
 
+	var lines []string
+	found := false
 	scanner := bufio.NewScanner(file)
+	scanner.Buffer(make([]byte, 0, 64*1024), 1024*1024)
 	for scanner.Scan() {
-		line := strings.TrimSpace(scanner.Text())
-		if line == "" || strings.HasPrefix(line, "#") {
+		raw := scanner.Text()
+		if strings.TrimSpace(raw) == ipToRemove {
+			found = true
 			continue
 		}
-		if line == ipToRemove {
-			found = true
-			continue // Skip the IP to remove
-		}
-		ips = append(ips, line)
+		lines = append(lines, raw)
 	}
-	file.Close()
-
 	if err := scanner.Err(); err != nil {
-		return false, fmt.Errorf("failed to scan file: %w", err)
+		return false, fmt.Errorf("failed to read blocklist file: %w", err)
 	}
 
 	if !found {
 		return false, nil
 	}
 
-	// Write remaining IPs back to file
-	file, err = os.Create(filePath)
-	if err != nil {
-		return false, fmt.Errorf("failed to create file: %w", err)
-	}
-	defer file.Close()
-
-	writer := bufio.NewWriter(file)
-	for _, ip := range ips {
-		if _, err := writer.WriteString(ip + "\n"); err != nil {
-			return false, fmt.Errorf("failed to write IP: %w", err)
-		}
-	}
-
-	if err := writer.Flush(); err != nil {
-		return false, fmt.Errorf("failed to flush writer: %w", err)
+	if err := writeBlocklistAtomic(filePath, lines); err != nil {
+		return false, err
 	}
 
 	d.log.Info("Removed IP from blocklist file",

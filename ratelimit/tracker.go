@@ -22,6 +22,11 @@ type Tracker struct {
 type RequestWindow struct {
 	Count       int
 	WindowStart time.Time
+	// Blocked is set once the window's count has first crossed MaxRequests.
+	// Subsequent requests in the same window still increment Count for stats
+	// but TrackRequest returns exceeded=false so callers don't re-fire the
+	// "add to blocklist" side effect on every request.
+	Blocked bool
 }
 
 // NewTracker creates a new rate limit tracker
@@ -92,6 +97,7 @@ func (t *Tracker) TrackRequest(clientIP net.IP, statusCode int) (exceeded bool, 
 	if now.Sub(window.WindowStart) >= t.config.WindowDuration {
 		window.Count = 1
 		window.WindowStart = now
+		window.Blocked = false
 		t.log.Debug("Reset window for IP",
 			zap.String("ip", ipStr),
 			zap.Int("status_code", statusCode))
@@ -101,15 +107,26 @@ func (t *Tracker) TrackRequest(clientIP net.IP, statusCode int) (exceeded bool, 
 	// Increment counter
 	window.Count++
 
-	// Check if limit exceeded
+	// Check if limit exceeded. Only fire exceeded=true on the transition
+	// from "under" to "over" within a window. Further requests still bump
+	// Count for observability but don't re-trigger the caller's block
+	// action (prevents thundering-herd blocklist writes).
 	if window.Count > t.config.MaxRequests {
-		t.log.Warn("Rate limit exceeded",
+		if !window.Blocked {
+			window.Blocked = true
+			t.log.Warn("Rate limit exceeded",
+				zap.String("ip", ipStr),
+				zap.Int("count", window.Count),
+				zap.Int("max", t.config.MaxRequests),
+				zap.Duration("window", t.config.WindowDuration),
+				zap.Int("status_code", statusCode))
+			return true, nil
+		}
+		t.log.Debug("Rate limit still exceeded (already blocked)",
 			zap.String("ip", ipStr),
 			zap.Int("count", window.Count),
-			zap.Int("max", t.config.MaxRequests),
-			zap.Duration("window", t.config.WindowDuration),
 			zap.Int("status_code", statusCode))
-		return true, nil
+		return false, nil
 	}
 
 	t.log.Debug("Tracked request",

@@ -48,9 +48,28 @@ func TestNewFileFetcher(t *testing.T) {
 	})
 
 	t.Run("NonexistentFile", func(t *testing.T) {
+		// Parent directory also doesn't exist → watcher.Add fails, so we
+		// surface an error. This is the unrecoverable case.
 		fetcher, err := NewFileFetcher("/nonexistent/file.txt", testLogger, nil)
 		assert.Error(t, err)
 		assert.Nil(t, fetcher)
+	})
+
+	t.Run("MissingFileInExistingDir", func(t *testing.T) {
+		// A fresh deployment often ships without a blocklist file yet. Starting
+		// is allowed: we treat the missing file as an empty range set and
+		// rely on the parent-directory watcher to pick up the CREATE event.
+		dir := t.TempDir()
+		missingPath := filepath.Join(dir, "blocklist.txt")
+
+		fetcher, err := NewFileFetcher(missingPath, testLogger, nil)
+		require.NoError(t, err)
+		require.NotNil(t, fetcher)
+		defer fetcher.Close()
+
+		ranges, err := fetcher.FetchIPRanges()
+		require.NoError(t, err)
+		assert.Empty(t, ranges)
 	})
 }
 
@@ -123,10 +142,11 @@ func TestFileFetcher_FetchIPRanges(t *testing.T) {
 		require.NoError(t, err)
 		defer fetcher.Close()
 
+		// Empty file is valid: new deployments may ship without any
+		// blocklist entries and the watcher will pick up later writes.
 		ranges, err := fetcher.FetchIPRanges()
-		assert.Error(t, err)
-		assert.Contains(t, err.Error(), "no IP ranges loaded")
-		assert.Nil(t, ranges)
+		require.NoError(t, err)
+		assert.Empty(t, ranges)
 	})
 
 	t.Run("OnlyCommentsAndEmptyLines", func(t *testing.T) {
@@ -147,9 +167,10 @@ func TestFileFetcher_FetchIPRanges(t *testing.T) {
 		require.NoError(t, err)
 		defer fetcher.Close()
 
+		// A file with only comments and blank lines is the same as empty.
 		ranges, err := fetcher.FetchIPRanges()
-		assert.Error(t, err)
-		assert.Nil(t, ranges)
+		require.NoError(t, err)
+		assert.Empty(t, ranges)
 	})
 
 	t.Run("WithInvalidIPs", func(t *testing.T) {
