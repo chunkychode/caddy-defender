@@ -27,7 +27,14 @@ func init() {
 
 var (
 	// DefaultRanges is the default ranges to block if none are specified.
-	DefaultRanges = []string{"aws", "gcloud", "azurepubliccloud", "openai", "deepseek", "githubcopilot"}
+	DefaultRanges = []string{
+		"aws",
+		"gcloud",
+		"azurepubliccloud",
+		"openai", //nolint:goconst // Inline service keys are clearer here.
+		"deepseek",
+		"githubcopilot",
+	}
 	// Tarpit Defaults
 	// defaultTarpitTimeout is the default duration for a request to be closed after.
 	defaultTarpitTimeout = time.Second * 30
@@ -193,7 +200,7 @@ func (m *Defender) Provision(ctx caddy.Context) error {
 	}
 
 	// Finish configuring tarpit responder's content reader / defaults
-	if m.RawResponder == "tarpit" {
+	if m.RawResponder == responderTarpit {
 		tarpitResponder, ok := m.responder.(*tarpit.Responder)
 		if !ok {
 			return fmt.Errorf("expected tarpit responder but got %T", m.responder)
