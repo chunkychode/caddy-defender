@@ -118,7 +118,9 @@ func (d *DefenderAdmin) Routes() []caddy.AdminRoute {
 			Handler: caddy.AdminHandlerFunc(d.handleBlocklist),
 		},
 		{
-			Pattern: "/defender/blocklist/*",
+			// Trailing slash = ServeMux subtree match (e.g. /defender/blocklist/1.2.3.4).
+			// A "/*" suffix would be a literal, not a wildcard, and never match.
+			Pattern: "/defender/blocklist/",
 			Handler: caddy.AdminHandlerFunc(d.handleBlocklistItem),
 		},
 		{
@@ -130,7 +132,8 @@ func (d *DefenderAdmin) Routes() []caddy.AdminRoute {
 			Handler: caddy.AdminHandlerFunc(d.handleAutoBlocklistStats),
 		},
 		{
-			Pattern: "/defender/auto_blocklist/reset/*",
+			// Trailing slash = ServeMux subtree match (e.g. /defender/auto_blocklist/reset/1.2.3.4).
+			Pattern: "/defender/auto_blocklist/reset/",
 			Handler: caddy.AdminHandlerFunc(d.handleAutoBlocklistReset),
 		},
 	}
@@ -517,13 +520,21 @@ func (d *DefenderAdmin) removeIPFromFile(filePath string, ipToRemove string) (bo
 	}
 	defer file.Close()
 
+	// The blocklist stores entries in CIDR form (e.g. "9.9.9.9/32"), but the
+	// DELETE API receives a bare IP from the URL path. Match a bare IP against
+	// its host-CIDR forms too, while still allowing an exact CIDR to be passed.
+	target := strings.TrimSpace(ipToRemove)
+	matches := func(line string) bool {
+		return line == target || line == target+"/32" || line == target+"/128"
+	}
+
 	var lines []string
 	found := false
 	scanner := bufio.NewScanner(file)
 	scanner.Buffer(make([]byte, 0, 64*1024), 1024*1024)
 	for scanner.Scan() {
 		raw := scanner.Text()
-		if strings.TrimSpace(raw) == ipToRemove {
+		if matches(strings.TrimSpace(raw)) {
 			found = true
 			continue
 		}
