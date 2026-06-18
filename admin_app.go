@@ -126,12 +126,12 @@ func (d *DefenderAdmin) Routes() []caddy.AdminRoute {
 			Handler: caddy.AdminHandlerFunc(d.handleStats),
 		},
 		{
-			Pattern: "/defender/ratelimit/stats",
-			Handler: caddy.AdminHandlerFunc(d.handleRateLimitStats),
+			Pattern: "/defender/auto_blocklist/stats",
+			Handler: caddy.AdminHandlerFunc(d.handleAutoBlocklistStats),
 		},
 		{
-			Pattern: "/defender/ratelimit/reset/*",
-			Handler: caddy.AdminHandlerFunc(d.handleRateLimitReset),
+			Pattern: "/defender/auto_blocklist/reset/*",
+			Handler: caddy.AdminHandlerFunc(d.handleAutoBlocklistReset),
 		},
 	}
 }
@@ -548,8 +548,8 @@ func (d *DefenderAdmin) removeIPFromFile(filePath string, ipToRemove string) (bo
 	return true, nil
 }
 
-// handleRateLimitStats returns current rate limiting statistics
-func (d *DefenderAdmin) handleRateLimitStats(w http.ResponseWriter, r *http.Request) error {
+// handleAutoBlocklistStats returns current auto-blocklisting statistics
+func (d *DefenderAdmin) handleAutoBlocklistStats(w http.ResponseWriter, r *http.Request) error {
 	defender := d.getDefender()
 	if defender == nil {
 		return caddy.APIError{
@@ -565,36 +565,36 @@ func (d *DefenderAdmin) handleRateLimitStats(w http.ResponseWriter, r *http.Requ
 		}
 	}
 
-	// Access the global rate limiter (singleton)
-	globalRateLimiterMu.RLock()
-	tracker := globalRateLimiter
-	globalRateLimiterMu.RUnlock()
+	// Access the global auto-blocklist tracker (singleton)
+	globalAutoBlocklistMu.RLock()
+	tracker := globalAutoBlocklist
+	globalAutoBlocklistMu.RUnlock()
 
 	if tracker == nil {
 		return caddy.APIError{
 			HTTPStatus: http.StatusBadRequest,
-			Message:    "rate limiting not enabled",
+			Message:    "auto-blocklisting not enabled",
 		}
 	}
 
 	stats := tracker.GetStats()
 
 	response := map[string]interface{}{
-		"enabled":       defender.RateLimitConfig.Enabled,
-		"status_codes":  defender.RateLimitConfig.StatusCodes,
-		"max_requests":  defender.RateLimitConfig.MaxRequests,
-		"window":        defender.RateLimitConfig.WindowDuration.String(),
+		"enabled":       defender.AutoBlocklistConfig.Enabled,
+		"status_codes":  defender.AutoBlocklistConfig.StatusCodes,
+		"max_requests":  defender.AutoBlocklistConfig.MaxRequests,
+		"window":        defender.AutoBlocklistConfig.WindowDuration.String(),
 		"tracked_count": len(stats),
 		"tracked_ips":   stats,
-		"note":          "Rate limiting is global across all Defender instances",
+		"note":          "Auto-blocklisting is global across all Defender instances",
 	}
 
 	w.Header().Set("Content-Type", "application/json")
 	return json.NewEncoder(w).Encode(response)
 }
 
-// handleRateLimitReset resets rate limiting tracking for a specific IP
-func (d *DefenderAdmin) handleRateLimitReset(w http.ResponseWriter, r *http.Request) error {
+// handleAutoBlocklistReset resets auto-blocklisting tracking for a specific IP
+func (d *DefenderAdmin) handleAutoBlocklistReset(w http.ResponseWriter, r *http.Request) error {
 	if r.Method != http.MethodDelete {
 		return caddy.APIError{
 			HTTPStatus: http.StatusMethodNotAllowed,
@@ -602,20 +602,20 @@ func (d *DefenderAdmin) handleRateLimitReset(w http.ResponseWriter, r *http.Requ
 		}
 	}
 
-	// Access the global rate limiter (singleton)
-	globalRateLimiterMu.RLock()
-	tracker := globalRateLimiter
-	globalRateLimiterMu.RUnlock()
+	// Access the global auto-blocklist tracker (singleton)
+	globalAutoBlocklistMu.RLock()
+	tracker := globalAutoBlocklist
+	globalAutoBlocklistMu.RUnlock()
 
 	if tracker == nil {
 		return caddy.APIError{
 			HTTPStatus: http.StatusBadRequest,
-			Message:    "rate limiting not enabled",
+			Message:    "auto-blocklisting not enabled",
 		}
 	}
 
 	// Extract IP from path
-	path := strings.TrimPrefix(r.URL.Path, "/defender/ratelimit/reset/")
+	path := strings.TrimPrefix(r.URL.Path, "/defender/auto_blocklist/reset/")
 	ip := strings.TrimSpace(path)
 
 	if ip == "" {
@@ -629,7 +629,7 @@ func (d *DefenderAdmin) handleRateLimitReset(w http.ResponseWriter, r *http.Requ
 	if !reset {
 		return caddy.APIError{
 			HTTPStatus: http.StatusNotFound,
-			Message:    fmt.Sprintf("IP not found in rate limit tracking: %s", ip),
+			Message:    fmt.Sprintf("IP not found in auto-blocklist tracking: %s", ip),
 		}
 	}
 

@@ -1,13 +1,15 @@
-# Rate Limiting Example
+# Auto-Blocklisting (Scanner Detection) Example
 
-This example demonstrates how to use Caddy Defender's built-in rate limiting feature to automatically block IPs that generate excessive 404 responses.
+This example demonstrates how to use Caddy Defender's built-in scanner auto-blocklisting feature to automatically and permanently block IPs that generate excessive 404 responses.
+
+> **Note:** This is a detect-and-block mechanism, not a rate limiter. Offending IPs are added to the persistent blocklist and are **not** automatically re-allowed after any time period. For a re-allowing rate limiter, use the `ratelimit` responder with [caddy-ratelimit](https://github.com/mholt/caddy-ratelimit).
 
 ## Features
 
 - **Automatic 404 Detection**: Tracks IPs generating 404 responses
 - **Configurable Thresholds**: Set custom limits and time windows
 - **Auto-Blocking**: IPs exceeding limits are automatically added to blocklist
-- **Admin API**: Monitor and manage rate limiting via REST endpoints
+- **Admin API**: Monitor and manage auto-blocklisting via REST endpoints
 - **No External Dependencies**: Built directly into Caddy Defender
 
 ## How It Works
@@ -26,7 +28,7 @@ This example demonstrates how to use Caddy Defender's built-in rate limiting fea
 defender block {
     blocklist_file /path/to/blocklist.txt
 
-    rate_limit_config {
+    auto_blocklist {
         enabled
         status_codes 404 403 401
         max_requests 10
@@ -44,7 +46,7 @@ defender block {
     "handler": "defender",
     "raw_responder": "block",
     "blocklist_file": "/path/to/blocklist.txt",
-    "rate_limit_config": {
+    "auto_blocklist": {
         "enabled": true,
         "status_codes": [404, 403, 401],
         "max_requests": 10,
@@ -59,19 +61,19 @@ defender block {
 
 | Option | Type | Default | Description |
 |--------|------|---------|-------------|
-| `enabled` | boolean | `false` | Enable/disable rate limiting |
+| `enabled` | boolean | `false` | Enable/disable auto-blocklisting |
 | `status_codes` | []int | `[404]` | HTTP status codes to track |
 | `max_requests` | int | `10` | Maximum requests allowed in window |
-| `window_duration` | duration | `5m` | Time window for counting requests |
+| `window_duration` | duration | `5m` | Detection window for counting requests |
 | `auto_add_to_blocklist` | boolean | `true` | Auto-add violators to blocklist |
 | `cleanup_interval` | duration | `10m` | How often to clean old tracking data |
 
 ## Admin API Endpoints
 
-### View Rate Limit Statistics
+### View Auto-Blocklist Statistics
 
 ```bash
-curl http://localhost:2019/defender/ratelimit/stats
+curl http://localhost:2019/defender/auto_blocklist/stats
 ```
 
 **Response:**
@@ -104,7 +106,7 @@ curl http://localhost:2019/defender/ratelimit/stats
 ### Reset Tracking for an IP
 
 ```bash
-curl -X DELETE http://localhost:2019/defender/ratelimit/reset/192.168.1.100
+curl -X DELETE http://localhost:2019/defender/auto_blocklist/reset/192.168.1.100
 ```
 
 **Response:**
@@ -125,7 +127,7 @@ for i in {1..5}; do
 done
 ```
 
-### Test Rate Limiting
+### Test Auto-Blocklisting
 
 ```bash
 # Make 15 404 requests - 11th request onwards should be blocked
@@ -168,7 +170,7 @@ These generate 404s, triggering automatic blocking.
 Track 401/403 responses to detect authentication attacks:
 
 ```caddy
-rate_limit_config {
+auto_blocklist {
     enabled
     status_codes 401 403
     max_requests 5
@@ -176,11 +178,11 @@ rate_limit_config {
 }
 ```
 
-### 3. API Rate Limiting
+### 3. API Abuse Auto-Blocklisting
 Protect API endpoints from abuse:
 
 ```caddy
-rate_limit_config {
+auto_blocklist {
     enabled
     status_codes 429  # Track rate limit responses
     max_requests 100
@@ -190,7 +192,7 @@ rate_limit_config {
 
 ## Important Notes
 
-1. **Requires `blocklist_file`**: Rate limiting requires a blocklist file to be configured for persistent blocking
+1. **Requires `blocklist_file`**: Auto-blocklisting requires a blocklist file to be configured for persistent blocking
 2. **Respects Whitelist**: IPs in the whitelist are never tracked or blocked
 3. **Fixed Window Algorithm**: Uses efficient fixed window counting (see docs for details)
 4. **Memory Efficient**: ~48KB for 1000 tracked IPs
@@ -198,7 +200,7 @@ rate_limit_config {
 
 ## Troubleshooting
 
-### Rate limiting not working
+### Auto-blocklisting not working
 
 1. Check `enabled` is set to `true`
 2. Verify `blocklist_file` is configured

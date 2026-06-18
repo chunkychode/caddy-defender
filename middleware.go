@@ -8,7 +8,7 @@ import (
 	"go.uber.org/zap"
 
 	"github.com/caddyserver/caddy/v2/modules/caddyhttp"
-	"pkg.jsn.cam/caddy-defender/ratelimit"
+	"pkg.jsn.cam/caddy-defender/autoblocklist"
 )
 
 // serveIgnore is a helper function to serve a robots.txt file if the ServeIgnore option is enabled.
@@ -72,52 +72,52 @@ func (m Defender) ServeHTTP(w http.ResponseWriter, r *http.Request, next caddyht
 
 	m.log.Debug("Request allowed (IP whitelisted or not in blocked ranges)", zap.String("ip", clientIP.String()))
 
-	// Capture the rate limiter tracker pointer once to avoid race conditions
+	// Capture the auto-blocklist tracker tracker pointer once to avoid race conditions
 	// If we check twice, the limiter could be stopped between checks causing nil pointer panic
-	globalRateLimiterMu.RLock()
-	tracker := globalRateLimiter
-	globalRateLimiterMu.RUnlock()
+	globalAutoBlocklistMu.RLock()
+	tracker := globalAutoBlocklist
+	globalAutoBlocklistMu.RUnlock()
 
-	// Wrap response writer to capture status code for rate limiting
-	var recorder *ratelimit.ResponseRecorder
+	// Wrap response writer to capture status code for auto-blocklisting
+	var recorder *autoblocklist.ResponseRecorder
 	if tracker != nil {
-		recorder = ratelimit.NewResponseRecorder(w)
+		recorder = autoblocklist.NewResponseRecorder(w)
 		w = recorder
 	}
 
 	// IP is allowed, proceed to the next handler
 	err = next.ServeHTTP(w, r)
 
-	// Track the request for rate limiting if enabled
-	// Skip rate limiting for whitelisted IPs
+	// Track the request for auto-blocklisting if enabled
+	// Skip auto-blocklisting for whitelisted IPs
 	if tracker != nil && recorder != nil && !m.ipChecker.IsWhitelisted(clientIP) {
 		exceeded, trackErr := tracker.TrackRequest(clientIP, recorder.StatusCode)
 		if trackErr != nil {
-			m.log.Error("Failed to track request for rate limiting",
+			m.log.Error("Failed to track request for auto-blocklisting",
 				zap.String("ip", clientIP.String()),
 				zap.Error(trackErr))
 		}
 
-		// If rate limit exceeded, add IP to blocklist
-		if exceeded && m.RateLimitConfig.AutoAddToBlocklist {
+		// If threshold exceeded, add IP to blocklist
+		if exceeded && m.AutoBlocklistConfig.AutoAddToBlocklist {
 			if addErr := m.addIPToBlocklist(clientIP); addErr != nil {
 				m.log.Error("Failed to add IP to blocklist",
 					zap.String("ip", clientIP.String()),
 					zap.Error(addErr))
 			} else {
-				m.log.Info("Rate limit exceeded - IP added to blocklist",
+				m.log.Info("Threshold exceeded - IP added to blocklist",
 					zap.String("ip", clientIP.String()),
 					zap.String("blocklist_file", m.BlocklistFile),
 					zap.Int("status_code", recorder.StatusCode),
-					zap.Int("max_requests", m.RateLimitConfig.MaxRequests),
-					zap.Duration("window", m.RateLimitConfig.WindowDuration))
+					zap.Int("max_requests", m.AutoBlocklistConfig.MaxRequests),
+					zap.Duration("window", m.AutoBlocklistConfig.WindowDuration))
 
 				// Block this request immediately (Option A)
 				return m.responder.ServeHTTP(recorder.ResponseWriter, r, next)
 			}
 		}
 	} else if tracker != nil && recorder != nil {
-		m.log.Debug("Skipping rate limiting for whitelisted IP",
+		m.log.Debug("Skipping auto-blocklisting for whitelisted IP",
 			zap.String("ip", clientIP.String()))
 	}
 

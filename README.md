@@ -10,8 +10,8 @@ The **Caddy Defender** plugin is a middleware for Caddy that allows you to block
 - **Embedded IP Ranges**: Predefined IP ranges for popular AI services (e.g., OpenAI, DeepSeek, GitHub Copilot).
 - **Custom IP Ranges**: Add your own IP ranges via Caddyfile configuration.
 - **File-Based Blocklists**: Load IP addresses from a file with automatic reload on changes (perfect for Docker volume mounts).
-- **Built-in Rate Limiting**: Automatically detect and block IPs generating excessive 404s (or other status codes) - perfect for catching scanners and bots.
-- **Admin API**: Dynamically manage blocklists and view rate limiting stats via RESTful API endpoints without restarting Caddy.
+- **Built-in Scanner Auto-Blocklisting**: Automatically detect and permanently block IPs generating excessive 404s (or other status codes) - perfect for catching scanners and bots. (Note: this is detect-and-block, not a re-allowing rate limiter.)
+- **Admin API**: Dynamically manage blocklists and view auto-blocklist stats via RESTful API endpoints without restarting Caddy.
 - **Multiple Responder Backends**:
   - **Block**: Return a `403 Forbidden` response.
   - **Custom**: Return a custom message.
@@ -65,7 +65,7 @@ defender <responder> {
     ranges <ip_ranges...>
     url <url>
     blocklist_file <path>
-    rate_limit_config {
+    auto_blocklist {
         enabled
         status_codes <codes...>
         max_requests <number>
@@ -98,9 +98,9 @@ The [documentation website](https://JasonLovesDoggo.github.io/caddy-defender/) h
 
 For a quick start, follow the [Getting Started](https://JasonLovesDoggo.github.io/caddy-defender/intro/) guide to protect your server using the _Caddy Defender Plugin_.
 
-### **Rate Limiting Quick Example**
+### **Auto-Blocklisting (Scanner Detection) Quick Example**
 
-Automatically block IPs that generate excessive 404 responses (scanner/bot detection):
+Automatically and permanently block IPs that generate excessive 404 responses (scanner/bot detection):
 
 ```caddyfile
 {
@@ -112,7 +112,7 @@ Automatically block IPs that generate excessive 404 responses (scanner/bot detec
         ranges openai aws
         blocklist_file /var/lib/caddy/blocklist.txt
 
-        rate_limit_config {
+        auto_blocklist {
             enabled
             status_codes 404
             max_requests 10
@@ -129,7 +129,7 @@ This configuration will:
 - Block IPs after 10 404s in 5 minutes
 - Automatically add violators to blocklist
 
-See [examples/rate-limiting](examples/rate-limiting/) for more details.
+See [examples/auto-blocklist](examples/auto-blocklist/) for more details.
 
 ---
 

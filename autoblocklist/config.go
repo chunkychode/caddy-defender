@@ -1,10 +1,10 @@
-package ratelimit
+package autoblocklist
 
 import "time"
 
-// Config holds the configuration for rate limiting based on HTTP status codes
+// Config holds the configuration for auto-blocklisting based on HTTP status codes
 type Config struct {
-	// Enabled determines if rate limiting is active
+	// Enabled determines if auto-blocklisting is active
 	Enabled bool `json:"enabled"`
 
 	// StatusCodes defines which HTTP status codes to track (e.g., [404])

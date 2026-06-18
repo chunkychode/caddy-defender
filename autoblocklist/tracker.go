@@ -1,4 +1,4 @@
-package ratelimit
+package autoblocklist
 
 import (
 	"net"
@@ -8,7 +8,7 @@ import (
 	"go.uber.org/zap"
 )
 
-// Tracker manages rate limiting based on HTTP status codes per IP address
+// Tracker manages auto-blocklisting based on HTTP status codes per IP address
 type Tracker struct {
 	config   Config
 	storage  map[string]*RequestWindow
@@ -29,7 +29,7 @@ type RequestWindow struct {
 	Blocked bool
 }
 
-// NewTracker creates a new rate limit tracker
+// NewTracker creates a new auto-blocklist tracker
 func NewTracker(config Config, log *zap.Logger) *Tracker {
 	config.ApplyDefaults()
 
@@ -49,7 +49,7 @@ func NewTracker(config Config, log *zap.Logger) *Tracker {
 		trackingMode = "ALL requests"
 	}
 
-	t.log.Info("Rate limiter initialized",
+	t.log.Info("Auto-blocklist tracker initialized",
 		zap.Bool("enabled", config.Enabled),
 		zap.String("tracking_mode", trackingMode),
 		zap.Ints("status_codes", config.StatusCodes),
@@ -59,7 +59,7 @@ func NewTracker(config Config, log *zap.Logger) *Tracker {
 	return t
 }
 
-// TrackRequest tracks a request and returns true if the rate limit was exceeded
+// TrackRequest tracks a request and returns true if the threshold was exceeded
 // This should be called AFTER the request has been processed to know the status code
 // If StatusCodes is empty, ALL requests are tracked regardless of status code
 func (t *Tracker) TrackRequest(clientIP net.IP, statusCode int) (exceeded bool, err error) {
@@ -114,7 +114,7 @@ func (t *Tracker) TrackRequest(clientIP net.IP, statusCode int) (exceeded bool, 
 	if window.Count > t.config.MaxRequests {
 		if !window.Blocked {
 			window.Blocked = true
-			t.log.Warn("Rate limit exceeded",
+			t.log.Warn("Threshold exceeded",
 				zap.String("ip", ipStr),
 				zap.Int("count", window.Count),
 				zap.Int("max", t.config.MaxRequests),
@@ -122,7 +122,7 @@ func (t *Tracker) TrackRequest(clientIP net.IP, statusCode int) (exceeded bool, 
 				zap.Int("status_code", statusCode))
 			return true, nil
 		}
-		t.log.Debug("Rate limit still exceeded (already blocked)",
+		t.log.Debug("Threshold still exceeded (already blocklisted)",
 			zap.String("ip", ipStr),
 			zap.Int("count", window.Count),
 			zap.Int("status_code", statusCode))
@@ -212,7 +212,7 @@ func (t *Tracker) cleanup() {
 	}
 
 	if removed > 0 {
-		t.log.Debug("Cleaned up old rate limit entries",
+		t.log.Debug("Cleaned up old tracking entries",
 			zap.Int("removed", removed),
 			zap.Int("remaining", len(t.storage)))
 	}
@@ -222,7 +222,7 @@ func (t *Tracker) cleanup() {
 func (t *Tracker) Stop() {
 	close(t.stopChan)
 	t.wg.Wait()
-	t.log.Info("Rate limiter stopped")
+	t.log.Info("Auto-blocklist tracker stopped")
 }
 
 // ResetIP clears tracking data for a specific IP
@@ -232,7 +232,7 @@ func (t *Tracker) ResetIP(ip string) bool {
 
 	if _, exists := t.storage[ip]; exists {
 		delete(t.storage, ip)
-		t.log.Info("Reset rate limit tracking for IP", zap.String("ip", ip))
+		t.log.Info("Reset auto-blocklist tracking for IP", zap.String("ip", ip))
 		return true
 	}
 	return false

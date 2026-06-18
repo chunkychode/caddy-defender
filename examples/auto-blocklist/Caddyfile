@@ -5,7 +5,7 @@
 }
 
 :80 {
-	# Configure Defender with built-in rate limiting
+	# Configure Defender with built-in scanner auto-blocklisting
 	defender block {
 		# Block known AI/cloud service ranges
 		ranges openai aws gcloud
@@ -13,9 +13,9 @@
 		# Path to blocklist file (will be updated automatically)
 		blocklist_file /var/lib/caddy/blocklist.txt
 
-		# Rate limiting configuration
-		rate_limit_config {
-			# Enable rate limiting
+		# Auto-blocklisting configuration (detect-and-permanently-block)
+		auto_blocklist {
+			# Enable auto-blocklisting
 			enabled
 
 			# Track 404 responses (can add other codes like 403, 401)
@@ -36,5 +36,5 @@
 	}
 
 	# Your application
-	respond "Hello from Caddy Defender with Rate Limiting!"
+	respond "Hello from Caddy Defender with Auto-Blocklisting!"
 }
