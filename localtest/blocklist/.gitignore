@@ -1,0 +1,5 @@
+# Runtime artifacts created by validate.ps1 (blocklist.txt, atomic-write temps).
+# Keep the directory itself so it can be bind-mounted.
+*
+!.gitignore
+!.gitkeep

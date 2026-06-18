@@ -1,0 +1,36 @@
+{
+	# Bind admin to all interfaces so the published :2019 port is reachable.
+	admin :2019
+	# NOTE: the Defender admin API (admin.api.defender) is auto-loaded by Caddy
+	# because it lives in the admin.api namespace — no global directive needed.
+	# Verbose so you can watch blocklist reloads / auto-blocklist events.
+	log {
+		level DEBUG
+	}
+}
+
+:8080 {
+	defender block {
+		# A TEST-NET range that will NOT match the Docker gateway, so requests
+		# start out ALLOWED and we can prove blocking happens via the list/API.
+		ranges 198.51.100.0/24
+
+		# IMPORTANT: bind-mount the DIRECTORY, not the file (atomic-rename rule).
+		blocklist_file /data/blocklist.txt
+
+		auto_blocklist {
+			enabled
+			status_codes 404
+			max_requests 5
+			window_duration 10m
+			auto_add_to_blocklist
+		}
+	}
+
+	# Any /missing* path returns 404 (to exercise auto-blocklisting).
+	@missing path /missing*
+	respond @missing "not found" 404
+
+	# Otherwise echo the client IP Caddy sees, so the test can target it.
+	respond "{http.request.remote.host}" 200
+}
