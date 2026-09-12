@@ -9,6 +9,7 @@ import (
 
 	"github.com/caddyserver/caddy/v2"
 	"github.com/caddyserver/caddy/v2/caddytest"
+	"pkg.jsn.cam/caddy-defender/autoblocklist"
 	"pkg.jsn.cam/caddy-defender/responders"
 	"pkg.jsn.cam/caddy-defender/responders/tarpit"
 
@@ -33,6 +34,41 @@ func TestUnmarshalCaddyfile(t *testing.T) {
 				RawResponder: "block",
 				Ranges:       []string{"192.168.1.0/24", "10.0.0.0/8"},
 			},
+		},
+		{
+			name: "auto_blocklist with path signatures",
+			input: `defender block {
+				ranges openai
+				auto_blocklist {
+					enabled
+					status_codes 404
+					paths .env /wp-admin
+					paths phpinfo
+				}
+			}`,
+			expected: Defender{
+				RawResponder: "block",
+				Ranges:       []string{"openai"},
+				AutoBlocklistConfig: autoblocklist.Config{
+					Enabled:            true,
+					StatusCodes:        []int{404},
+					MaxRequests:        10,
+					WindowDuration:     5 * time.Minute,
+					AutoAddToBlocklist: true,
+					CleanupInterval:    10 * time.Minute,
+					Paths:              []string{".env", "/wp-admin", "phpinfo"},
+				},
+			},
+		},
+		{
+			name: "auto_blocklist paths without argument",
+			input: `defender block {
+				auto_blocklist {
+					enabled
+					paths
+				}
+			}`,
+			expectError: true,
 		},
 		{
 			name: "valid custom responder with message",
@@ -194,6 +230,7 @@ func TestUnmarshalCaddyfile(t *testing.T) {
 			require.Equal(t, tt.expected.RawResponder, def.RawResponder)
 			require.Equal(t, tt.expected.Ranges, def.Ranges)
 			require.Equal(t, tt.expected.Message, def.Message)
+			require.Equal(t, tt.expected.AutoBlocklistConfig, def.AutoBlocklistConfig)
 		})
 	}
 }
@@ -357,6 +394,36 @@ func TestValidation(t *testing.T) {
 			responder:    &responders.BlockResponder{},
 		}
 		require.ErrorContains(t, def.Validate(), "invalid IP address")
+	})
+
+	t.Run("auto_blocklist paths: no entries is valid", func(t *testing.T) {
+		def := Defender{
+			RawResponder:        "block",
+			Ranges:              []string{"10.0.0.0/8"},
+			responder:           &responders.BlockResponder{},
+			AutoBlocklistConfig: autoblocklist.Config{Enabled: true},
+		}
+		require.NoError(t, def.Validate())
+	})
+
+	t.Run("auto_blocklist paths: bare slash rejected", func(t *testing.T) {
+		def := Defender{
+			RawResponder:        "block",
+			Ranges:              []string{"10.0.0.0/8"},
+			responder:           &responders.BlockResponder{},
+			AutoBlocklistConfig: autoblocklist.Config{Enabled: true, Paths: []string{".env", "/"}},
+		}
+		require.ErrorContains(t, def.Validate(), "would match every request")
+	})
+
+	t.Run("auto_blocklist paths: empty entry rejected", func(t *testing.T) {
+		def := Defender{
+			RawResponder:        "block",
+			Ranges:              []string{"10.0.0.0/8"},
+			responder:           &responders.BlockResponder{},
+			AutoBlocklistConfig: autoblocklist.Config{Enabled: true, Paths: []string{""}},
+		}
+		require.ErrorContains(t, def.Validate(), "is empty")
 	})
 
 	t.Run("Missing ranges", func(t *testing.T) {

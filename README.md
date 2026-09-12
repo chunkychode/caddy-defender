@@ -70,6 +70,7 @@ defender <responder> {
         status_codes <codes...>
         max_requests <number>
         window_duration <duration>
+        paths <signatures...>
     }
 }
 ```
@@ -87,6 +88,16 @@ defender <responder> {
 - `<http_status_code>`: Optional HTTP status code for the `custom` responder (defaults to 200).
 - `<url>`: The URI that the `redirect` responder would redirect to.
 - `<path>`: Path to a file containing IP addresses/CIDR ranges (one per line) to block. The file is automatically monitored for changes.
+- `paths <signatures...>`: Request-path signatures that blocklist an IP on the **first** hit, regardless of response status. Checked before the request is proxied, so it works behind an auth proxy where every probe would otherwise be answered with a 302 and status-code counting never triggers. Whitelisted IPs are exempt. Matching is case-insensitive and the mode is chosen by the first character:
+
+  | Entry | Mode | Matches | Doesn't match |
+  |---|---|---|---|
+  | `.env` | substring | `/aws/.env`, `/.env.bak`, `/api/.ENV` | `/environment` |
+  | `/wp-admin` | prefix | `/wp-admin`, `/wp-admin/setup.php` | `/blog/wp-admin` |
+  | `phpinfo` | substring | `/phpinfo.php`, `/test/PHPINFO` | `/php` |
+  | `/actuator` | prefix | `/actuator/health` | `/api/actuator` |
+
+  Pick strings no legitimate user would ever request and avoid short generic ones like `admin`. No regex or globs. Multiple `paths` lines accumulate.
 
 For more information about the configuration, refer to the [configuration page](https://JasonLovesDoggo.github.io/caddy-defender/config/) on the website.
 
@@ -103,10 +114,7 @@ For a quick start, follow the [Getting Started](https://JasonLovesDoggo.github.i
 Automatically and permanently block IPs that generate excessive 404 responses (scanner/bot detection):
 
 ```caddyfile
-{
-    defender_admin  # Enable admin API
-}
-
+# The admin API (admin.api.defender) is auto-loaded by Caddy; no global option needed.
 :80 {
     defender block {
         ranges openai aws
@@ -117,6 +125,8 @@ Automatically and permanently block IPs that generate excessive 404 responses (s
             status_codes 404
             max_requests 10
             window_duration 5m
+            # ban on first sight, whatever the status code
+            paths .env .git/ wp-login.php xmlrpc.php phpinfo
         }
     }
 

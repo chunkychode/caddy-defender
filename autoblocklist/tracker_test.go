@@ -2,6 +2,7 @@ package autoblocklist
 
 import (
 	"net"
+	"strings"
 	"testing"
 	"time"
 
@@ -387,5 +388,104 @@ func TestDefaultConfig(t *testing.T) {
 
 	if config.WindowDuration != 5*time.Minute {
 		t.Errorf("Expected default WindowDuration to be 5m, got %v", config.WindowDuration)
+	}
+}
+
+func TestConfig_MatchPath(t *testing.T) {
+	cfg := Config{Paths: []string{".env", "/wp-admin", "phpinfo", ""}}
+
+	tests := []struct {
+		path    string
+		wantSig string
+		wantHit bool
+	}{
+		{"/aws/.env", ".env", true},
+		{"/.ENV.bak", ".env", true}, // case-insensitive substring
+		{"/wp-admin/setup.php", "/wp-admin", true},
+		{"/blog/wp-admin", "", false}, // prefix entries only match at the start
+		{"/PHPINFO.php", "phpinfo", true},
+		{"/api/accounts/revision-date", "", false},
+		{"/", "", false},
+	}
+	for _, tt := range tests {
+		sig, hit := cfg.MatchPath(tt.path)
+		if hit != tt.wantHit || sig != tt.wantSig {
+			t.Errorf("MatchPath(%q) = (%q,%v), want (%q,%v)", tt.path, sig, hit, tt.wantSig, tt.wantHit)
+		}
+	}
+
+	if _, hit := (Config{}).MatchPath("/aws/.env"); hit {
+		t.Error("empty Paths must never match")
+	}
+}
+
+func TestMarkBlocked(t *testing.T) {
+	tracker := NewTracker(Config{
+		Enabled:        true,
+		StatusCodes:    []int{404},
+		MaxRequests:    5,
+		WindowDuration: time.Minute,
+	}, zap.NewNop())
+	defer tracker.Stop()
+
+	ip := net.ParseIP("203.0.113.9")
+	tracker.MarkBlocked(ip)
+
+	st := tracker.GetStats()[ip.String()]
+	if !st.ExceedsThreshold {
+		t.Fatal("MarkBlocked must push the IP over the threshold in stats")
+	}
+	if st.RequestCount != 6 {
+		t.Errorf("expected count max+1=6, got %d", st.RequestCount)
+	}
+
+	// A later tracked status must not re-fire the exceeded transition.
+	if exceeded, _ := tracker.TrackRequest(ip, 404); exceeded {
+		t.Error("TrackRequest re-fired exceeded after MarkBlocked")
+	}
+	if tracker.Config().MaxRequests != 5 {
+		t.Error("Config() should expose the effective config")
+	}
+}
+
+func TestConfig_Validate(t *testing.T) {
+	tests := []struct {
+		name    string
+		paths   []string
+		wantErr string
+	}{
+		{"nil paths", nil, ""},
+		{"empty slice", []string{}, ""},
+		{"good entries", []string{".env", "/wp-admin", "phpinfo"}, ""},
+		{"empty entry", []string{".env", ""}, "is empty"},
+		{"whitespace-only entry", []string{"   "}, "is empty"},
+		{"padded entry", []string{" .env"}, "leading/trailing whitespace"},
+		{"bare slash", []string{"/"}, "would match every request"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := Config{Paths: tt.paths}.Validate()
+			if tt.wantErr == "" {
+				if err != nil {
+					t.Fatalf("unexpected error: %v", err)
+				}
+				return
+			}
+			if err == nil || !strings.Contains(err.Error(), tt.wantErr) {
+				t.Fatalf("want error containing %q, got %v", tt.wantErr, err)
+			}
+		})
+	}
+}
+
+// A Defender with no paths configured must never path-ban anything, and a
+// request path that merely resembles a signature must not match either.
+func TestConfig_MatchPath_NoPathsConfigured(t *testing.T) {
+	for _, cfg := range []Config{{}, {Paths: nil}, {Paths: []string{}}} {
+		for _, p := range []string{"/", "/.env", "/wp-admin/x", ""} {
+			if sig, hit := cfg.MatchPath(p); hit {
+				t.Errorf("MatchPath(%q) with no paths returned (%q,true)", p, sig)
+			}
+		}
 	}
 }

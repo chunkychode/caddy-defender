@@ -48,6 +48,10 @@ var (
 	globalAutoBlocklistMu       sync.RWMutex
 	globalAutoBlocklistRefCount int                   // Tracks how many Defender instances are using the auto-blocklist tracker
 	globalAutoBlocklistConfig   *autoblocklist.Config // Stores the config from the first instance for comparison
+	// globalAutoBlocklistFile is the blocklist file auto-adds fall back to when
+	// the Defender instance that observed the violation has no blocklist_file
+	// of its own. Populated from the first instance that has one.
+	globalAutoBlocklistFile string
 )
 
 // Defender implements an HTTP middleware that enforces IP-based rules to protect your site from AIs/Scrapers.
@@ -249,6 +253,9 @@ func (m *Defender) Provision(ctx caddy.Context) error {
 					zap.Duration("this_window", m.AutoBlocklistConfig.WindowDuration))
 			}
 		}
+		if globalAutoBlocklistFile == "" && m.BlocklistFile != "" {
+			globalAutoBlocklistFile = m.BlocklistFile
+		}
 		globalAutoBlocklistRefCount++
 		m.log.Debug("Auto-blocklist tracker reference count incremented",
 			zap.Int("ref_count", globalAutoBlocklistRefCount))
@@ -256,6 +263,14 @@ func (m *Defender) Provision(ctx caddy.Context) error {
 	}
 
 	return nil
+}
+
+// currentAutoBlocklist snapshots the global tracker and fallback blocklist file
+// under one lock so a concurrent Cleanup cannot nil the tracker between reads.
+func currentAutoBlocklist() (*autoblocklist.Tracker, string) {
+	globalAutoBlocklistMu.RLock()
+	defer globalAutoBlocklistMu.RUnlock()
+	return globalAutoBlocklist, globalAutoBlocklistFile
 }
 
 // configsMatch compares two auto-blocklist configs to check if they're equivalent
@@ -319,6 +334,7 @@ func (m *Defender) Cleanup() error {
 			globalAutoBlocklist.Stop()
 			globalAutoBlocklist = nil
 			globalAutoBlocklistConfig = nil
+			globalAutoBlocklistFile = ""
 			globalAutoBlocklistRefCount = 0 // Ensure it doesn't go negative
 		}
 		globalAutoBlocklistMu.Unlock()

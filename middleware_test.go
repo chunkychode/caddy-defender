@@ -5,12 +5,16 @@ import (
 	"context"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/caddyserver/caddy/v2"
 	"github.com/caddyserver/caddy/v2/modules/caddyhttp"
 	"github.com/stretchr/testify/require"
 	"go.uber.org/zap"
+	"pkg.jsn.cam/caddy-defender/autoblocklist"
 	"pkg.jsn.cam/caddy-defender/responders"
 )
 
@@ -255,4 +259,136 @@ func TestDefenderServeHTTP_UsesCaddyClientIP(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, http.StatusForbidden, recorder.Code)
 	require.Equal(t, "Access denied", recorder.Body.String())
+}
+
+// statusHandler is a next-handler that answers with a fixed status code.
+type statusHandler struct{ code int }
+
+func (h *statusHandler) ServeHTTP(w http.ResponseWriter, _ *http.Request) error {
+	w.WriteHeader(h.code)
+	return nil
+}
+
+// withAutoBlocklistGlobals installs a DefenderAdmin singleton (needed for file
+// writes) and guarantees the global tracker is torn down afterwards so tests
+// don't leak singleton state into each other.
+func withAutoBlocklistGlobals(t *testing.T, defenders ...*Defender) {
+	t.Helper()
+	globalAdminMu.Lock()
+	globalDefenderAdmin = &DefenderAdmin{log: zap.NewNop()}
+	globalAdminMu.Unlock()
+	t.Cleanup(func() {
+		for _, d := range defenders {
+			_ = d.Cleanup()
+		}
+		globalAdminMu.Lock()
+		globalDefenderAdmin = nil
+		globalAdminMu.Unlock()
+	})
+}
+
+func readBlocklist(t *testing.T, path string) string {
+	t.Helper()
+	b, err := os.ReadFile(path)
+	if err != nil && !os.IsNotExist(err) {
+		t.Fatalf("read blocklist: %v", err)
+	}
+	return string(b)
+}
+
+func TestDefenderServeHTTP_PathSignatureBansImmediately(t *testing.T) {
+	file := filepath.Join(t.TempDir(), "blocklist.txt")
+	defender := &Defender{
+		RawResponder:  "block",
+		Ranges:        []string{"198.51.100.0/24"},
+		BlocklistFile: file,
+		responder:     &responders.BlockResponder{},
+		AutoBlocklistConfig: autoblocklist.Config{
+			Enabled:            true,
+			StatusCodes:        []int{404},
+			MaxRequests:        5,
+			WindowDuration:     time.Minute,
+			AutoAddToBlocklist: true,
+			Paths:              []string{".env"},
+		},
+	}
+	withAutoBlocklistGlobals(t, defender)
+	defender.log = zap.NewNop()
+	require.NoError(t, defender.Provision(caddy.Context{Context: context.Background()}))
+
+	// The app would have answered 302 (auth proxy); the ban must not depend on it.
+	req := httptest.NewRequest(http.MethodGet, "/aws/.env", nil)
+	req.RemoteAddr = "203.0.113.50:44426"
+	rec := httptest.NewRecorder()
+	require.NoError(t, defender.ServeHTTP(rec, req, &statusHandler{code: http.StatusFound}))
+
+	require.Equal(t, http.StatusForbidden, rec.Code, "first .env probe must be answered by the responder")
+	require.Contains(t, readBlocklist(t, file), "203.0.113.50/32")
+
+	// Tracker stats reflect the ban so a later 404 burst can't double-write.
+	tracker, _ := currentAutoBlocklist()
+	require.NotNil(t, tracker)
+	require.True(t, tracker.GetStats()["203.0.113.50"].ExceedsThreshold)
+
+	// Whitelisted IPs are exempt from path signatures.
+	defender.Whitelist = []string{"203.0.113.51"}
+	defender.ipChecker.UpdateRanges(defender.Ranges)
+	wl := &Defender{
+		RawResponder:  "block",
+		Ranges:        []string{"198.51.100.0/24"},
+		Whitelist:     []string{"203.0.113.51"},
+		BlocklistFile: file,
+		responder:     &responders.BlockResponder{},
+	}
+	wl.log = zap.NewNop()
+	require.NoError(t, wl.Provision(caddy.Context{Context: context.Background()}))
+	req = httptest.NewRequest(http.MethodGet, "/aws/.env", nil)
+	req.RemoteAddr = "203.0.113.51:1"
+	rec = httptest.NewRecorder()
+	require.NoError(t, wl.ServeHTTP(rec, req, &statusHandler{code: http.StatusFound}))
+	require.Equal(t, http.StatusFound, rec.Code)
+	require.NotContains(t, readBlocklist(t, file), "203.0.113.51")
+}
+
+// Regression: the tracker is a singleton, so a vhost WITHOUT its own
+// auto_blocklist block still feeds it. The write decision and target file must
+// therefore come from the global config, otherwise that vhost consumes the
+// once-per-window "exceeded" transition and nobody ever writes the IP.
+func TestDefenderServeHTTP_AutoAddUsesGlobalConfig(t *testing.T) {
+	file := filepath.Join(t.TempDir(), "blocklist.txt")
+	primary := &Defender{
+		RawResponder:  "block",
+		Ranges:        []string{"198.51.100.0/24"},
+		BlocklistFile: file,
+		responder:     &responders.BlockResponder{},
+		AutoBlocklistConfig: autoblocklist.Config{
+			Enabled:            true,
+			StatusCodes:        []int{404},
+			MaxRequests:        2,
+			WindowDuration:     time.Minute,
+			AutoAddToBlocklist: true,
+		},
+	}
+	// No auto_blocklist block and no blocklist_file of its own.
+	bare := &Defender{
+		RawResponder: "block",
+		Ranges:       []string{"198.51.100.0/24"},
+		responder:    &responders.BlockResponder{},
+	}
+	withAutoBlocklistGlobals(t, primary, bare)
+	primary.log, bare.log = zap.NewNop(), zap.NewNop()
+	ctx := caddy.Context{Context: context.Background()}
+	require.NoError(t, primary.Provision(ctx))
+	require.NoError(t, bare.Provision(ctx))
+
+	var rec *httptest.ResponseRecorder
+	for i := 0; i < 3; i++ {
+		req := httptest.NewRequest(http.MethodGet, "/missing", nil)
+		req.RemoteAddr = "203.0.113.77:2"
+		rec = httptest.NewRecorder()
+		require.NoError(t, bare.ServeHTTP(rec, req, &statusHandler{code: http.StatusNotFound}))
+	}
+
+	require.Contains(t, readBlocklist(t, file), "203.0.113.77/32",
+		"violation seen by the bare vhost must land in the global blocklist file")
 }

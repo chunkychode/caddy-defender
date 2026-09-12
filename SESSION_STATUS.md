@@ -1,6 +1,6 @@
 # Caddy-Defender — Status
 
-Primer for picking this repo up cold. Last updated **2026-06-18** at the end of the session that renamed the rate-limiter to `auto_blocklist`, fixed two latent admin-API bugs, and merged upstream.
+Primer for picking this repo up cold. Last updated **2026-09-11** at the end of the session that merged upstream (Datadog fetcher, dep bumps), added **path-signature instant banning**, and fixed the singleton auto-add bug.
 
 ---
 
@@ -12,124 +12,118 @@ A Caddy v2 middleware plugin (`pkg.jsn.cam/caddy-defender`) that blocks or manip
 - **`upstream`** = `JasonLovesDoggo/caddy-defender` (the original)
 
 Core features:
-- **IP range filtering** — predefined keys (`openai`, `aws`, `gcloud`, …) or literal CIDRs.
+- **IP range filtering** — predefined keys (`openai`, `aws`, `gcloud`, `datadog`, …) or literal CIDRs.
 - **File-based blocklist** — a text file watched via fsnotify; reloads on change.
-- **Auto-blocklisting** (formerly "rate_limit_config", renamed this session) — detects abuse by counting configurable status codes (e.g. 404s) per IP per window and **permanently** adds violators to the blocklist. It is detect-and-block, **not** a rate limiter — it never re-allows an IP after a window.
-- **Admin API** — RESTful endpoints under `/defender/*` on Caddy's admin listener for blocklist management and auto-blocklist stats.
-- **Responders** — block, custom, drop, garbage, redirect, **ratelimit** (header-only forwarder for external [caddy-ratelimit](https://github.com/mholt/caddy-ratelimit)), tarpit.
+- **Auto-blocklisting** — detects abuse and **permanently** adds violators to the blocklist. Two triggers:
+  1. **Status-code counting** — N tracked status codes per IP per window.
+  2. **Path signatures** (new this session) — first request whose path matches a configured signature (`.env`, `/wp-admin`, …) bans immediately, regardless of status code.
+  It is detect-and-block, **not** a rate limiter — it never re-allows an IP.
+- **Admin API** — `/defender/*` on Caddy's admin listener (auto-loaded, no global option needed).
+- **Responders** — block, custom, drop, garbage, redirect, ratelimit (header-only), tarpit.
 
 ## Layout
 
 ```
-plugin.go              Defender type, Provision, Cleanup; global auto-blocklist singleton
-middleware.go          ServeHTTP: client-IP resolve → IP check → responder; recorder for auto-blocklist tracking
-config.go              Caddyfile/JSON unmarshal, Validate; responder type consts
-admin_app.go           admin.api.defender module — /defender/blocklist, /defender/stats, /defender/auto_blocklist/*
+plugin.go              Defender type, Provision, Cleanup; global auto-blocklist singleton (+ fallback blocklist file)
+middleware.go          ServeHTTP: client-IP → range check → path-signature check → proxy → status-code tracking
+config.go              Caddyfile/JSON unmarshal, Validate
+admin_app.go           admin.api.defender — /defender/blocklist, /defender/stats, /defender/auto_blocklist/*
 ranges/fetchers/       Per-source CIDR fetchers + FileFetcher (fsnotify, parent-dir watch)
-autoblocklist/         Tracker (fixed-window counter per IP) + Config + ResponseRecorder  (was ratelimit/)
+autoblocklist/         Tracker (fixed-window counter per IP), Config (incl. Paths + MatchPath), ResponseRecorder
 matchers/ip/           IPChecker wrapping gaissmai/bart trie
-matchers/whitelist/    Whitelist validation and lookup
 responders/            block, custom, drop, garbage, redirect, ratelimit, tarpit
-localtest/             Dockerized end-to-end validation harness (validate.ps1)
+localtest/             Dockerized end-to-end harness (validate.ps1) — 17 checks
 ```
 
 ---
 
-## This session's work (branch `feature/rate-limiter`)
+## This session's work (branch `auto-blocklist`)
 
-Four commits on top of the previously-shipped fixes, then an upstream merge.
+### 1. Merged `upstream/main` (committed: `1afa81e`)
+16 commits: Datadog IP-range fetcher (#153, new `datadog` key), bart 0.28.0→0.29.0, testify 1.11.1→1.12.1, embedded CIDR refreshes. Only conflict was go.mod (our direct `fsnotify` dep, same as last time). 0 behind upstream.
 
-1. **`refactor: rename rate_limit_config feature to auto_blocklist`**
-   - Pure rename, behaviour unchanged. Caddyfile/JSON key `rate_limit_config` → `auto_blocklist`; Go package `ratelimit/` → `autoblocklist/`; field `RateLimitConfig` → `AutoBlocklistConfig`; vars `globalRateLimiter*` → `globalAutoBlocklist*`; admin routes `/defender/ratelimit/*` → `/defender/auto_blocklist/*`; `examples/rate-limiting/` → `examples/auto-blocklist/`.
-   - **BREAKING (no alias):** old Caddyfile/JSON keys and old admin routes are gone.
+### 2. Path-signature instant ban (UNCOMMITTED at time of writing)
+Motivated by a prod log: a GCP box (34.176.41.51) probed `fin.himmelman.family/<vendor>/.env` 19× in 2.7s. Authentik's `forward_auth` answered every probe with a **302**, which isn't a tracked status code, so auto_blocklist never fired. Status-code counting is blind behind an auth proxy.
 
-2. **`fix: repair admin API DELETE/reset endpoints (two latent bugs)`** — both pre-existing, never worked in prod:
-   - Admin routes used `/*`. Caddy's admin API uses `net/http.ServeMux`, where `*` is a **literal**, not a wildcard, so `DELETE /defender/blocklist/1.2.3.4` always 404'd. Changed to trailing-slash subtree match (`/defender/blocklist/`, `/defender/auto_blocklist/reset/`).
-   - `removeIPFromFile` compared the bare URL IP against CIDR file entries (`9.9.9.9` vs `9.9.9.9/32`) → never matched. Now matches bare IP against its `/32` and `/128` forms.
-   - These were invisible to unit tests (which exercise the file helpers, not HTTP routing).
+New `auto_blocklist` sub-option:
+```caddyfile
+auto_blocklist {
+    enabled
+    ...
+    paths .env .git/ wp-login.php xmlrpc.php phpinfo /wp-admin
+}
+```
+- Entry starting with `/` → **prefix** match; otherwise **substring**. Case-insensitive.
+- Checked **before** the request is proxied. On hit: `tracker.MarkBlocked(ip)` (stats show it, prevents a duplicate write from a later 404 burst), write IP to blocklist, respond with the configured responder.
+- Whitelisted IPs exempt. If `auto_add_to_blocklist` is off, logs a Warn and passes through (detect-only).
+- **Validation** (`autoblocklist.Config.Validate`, called from `Defender.Validate`): rejects empty/whitespace entries and a bare `/` (would ban every visitor). Verified with `caddy validate` in the built image: bad config fails at load with a clear message.
+- Code: `autoblocklist/config.go` (`Paths`, `MatchPath`), `autoblocklist/tracker.go` (`Config()`, `MatchPath`, `MarkBlocked`), `middleware.go`, `config.go` (`paths` parsing).
 
-3. **`test: add localtest admin/blocklist validation harness`** — `localtest/validate.ps1` spins up a container and verifies every admin endpoint + blocking + auto_blocklist end-to-end. **Run:** `powershell -ExecutionPolicy Bypass -File localtest\validate.ps1` (Docker must be running; image `caddy-defender:autoblocklist-test` built locally). Result this session: **12/12**.
+### 3. Singleton auto-add bug fix (UNCOMMITTED)
+The tracker is process-global, but the "write to blocklist" decision used the **per-vhost** config (`m.AutoBlocklistConfig.AutoAddToBlocklist`, `m.BlocklistFile`). A vhost without an `auto_blocklist {}` block still fed the shared counter, and if the once-per-window "exceeded" transition fired on that vhost, nobody ever wrote the IP. Fixed: decision comes from `tracker.Config()`, and the file falls back to `globalAutoBlocklistFile` (first enabled instance's `blocklist_file`). Regression test: `TestDefenderServeHTTP_AutoAddUsesGlobalConfig`. Not hit in prod today (every vhost imports `defme`), but latent.
 
-4. **`Merge upstream/main into feature/rate-limiter`** — caught up from 14 commits behind to **0 behind**:
-   - **#139 trusted-proxy client IP** — defender now resolves the client IP via `caddyhttp.ClientIPVarKey` (respects `trusted_proxies`) instead of raw `RemoteAddr`. Relevant to prod (see below).
-   - **Security bumps:** Caddy 2.11.3 → **2.11.4**, go-jose 3.0.5 (#135), bart 0.28.0; embedded AI CIDR refreshes.
-   - **Restored the `ratelimit` responder** (upstream kept it; our branch had deleted it). It now coexists with `auto_blocklist` — no naming collision after the rename, so the config.go switch no longer diverges from upstream.
-   - Conflict resolution: config.go took upstream's const-extraction + restored ratelimit responder while preserving our auto_blocklist parsing; go.mod/go.sum took upstream then `go mod tidy` re-added our direct dep `fsnotify` (absent upstream).
-
-Verification: `go build`/`go test` green; localtest 12/12; `defender ratelimit {…}` Caddyfile validates; modules `admin.api.defender` + `http.handlers.defender` present; `caddy version` = v2.11.4.
-
----
-
-## Corrected facts (previous SESSION_STATUS was wrong)
-
-- **There is no `defender_admin` global option.** It is not registered anywhere in the code. `DefenderAdmin` is an `admin.api.defender` module that Caddy **auto-loads** because it lives in the `admin.api` namespace. A `defender_admin` line in the global options block makes Caddy fail to start (`unrecognized global option`). Remove it from any Caddyfile that has it.
-- **Prod exposes the admin API via `CADDY_ADMIN=0.0.0.0:2019`** (set in the caddy compose service env). Port 2019 is **not** published to the host — only reachable on the `portainer_caddy` / `inside` docker networks, where n8n lives. That is how the Grafana→n8n auto-add POST to `http://caddy:2019/defender/blocklist` works. Note: anything on those networks has the full Caddy control API.
+### Verification
+- `go vet` + `go test ./...` green in `caddy:builder`.
+- `localtest/validate.ps1` **17/17** (new step 8 covers path bans).
+- Docs updated: README syntax + quick example (also removed the bogus `defender_admin` global), `examples/auto-blocklist/README.md` table.
 
 ---
 
 ## Production deployment
 
-- **Current prod image (this session's build):** `cechode/caddy-defender:auto-blocklist-v6`, pushed to Docker Hub 2026-06-18, digest `sha256:b9601b100d8f7c35686a3a709c406d8ea8e91507a969e83be3067e234a161334`. (Supersedes `feature-rate-limit-v5`.)
+- **Latest pushed image:** `cechode/caddy-defender:auto-blocklist-v7` (also tagged `latest`), pushed 2026-09-11, digest `sha256:9e5dda8f9941dcca07c0c801fac96c3dcf29649b81dd672b5092ed27d60ea1e1`. Contains path signatures + singleton fix + validation. Built from the **uncommitted** working tree (see Repo state). Prod was on `auto-blocklist-v6` at session end; deploy is the user's call.
 
-### Required coordinated migration (do these together in one deploy)
+### Actual prod `(defme)` snippet (corrected 2026-09-11; previous doc was stale)
+```caddyfile
+defender drop {
+    whitelist 192.168.100.108 173.164.175.106 173.164.175.107 173.164.175.109
+    ranges openai aws
+    blocklist_file /etc/caddy/blocklist/blocklist.txt
+    auto_blocklist {
+        enabled
+        status_codes 400 401 403 404 405 406 415 505
+        max_requests 5
+        window_duration 1m
+    }
+}
+```
+Every vhost imports `alwaysinclude` → `defme`. `fin` and `files` sit behind authentik `forward_auth` (302 for unauthenticated), so only path signatures can catch scanners there.
 
-The rename is breaking with no alias, so the image and Caddyfile must change together:
-1. compose `image:` → `cechode/caddy-defender:auto-blocklist-v6`
-2. In the prod Caddyfile `(defme)` snippet, rename the block (sub-fields unchanged):
-   ```caddyfile
-   auto_blocklist {        # was: rate_limit_config
-       enabled
-       status_codes 404 403 502 401 308 301 302
-       max_requests 5
-       window_duration 1m
-   }
-   ```
-   Deploying the new image with the old key → Caddy won't start. The n8n POST path (`/defender/blocklist`) and the blocklist directory mount are unaffected by the rename.
+### Recommended prod changes after deploying v7
+1. Add `paths .env .git/ wp-login.php xmlrpc.php phpinfo /wp-admin /actuator` to `auto_blocklist`.
+2. Add `gcloud` to `ranges` (34.176.0.0/16 is in the embedded list; would have stopped the observed scanner on request 1). Consider `digitalocean vultr linode oci aliyun huawei` too.
+3. Do **not** add 302 to `status_codes` — an expired-session SPA user fires several 302s in a second and would be permanently banned at threshold 5.
 
 ### Critical bind-mount rule (unchanged)
-
-`os.Rename` in the atomic-write path **cannot** replace a target that is itself a Docker bind-mount (`EBUSY`). Bind-mount the **directory** containing the blocklist, not the file. Prod already does this: `/mnt/data/compdata/caddy/blocklist:/etc/caddy/blocklist` + `blocklist_file /etc/caddy/blocklist/blocklist.txt`. ✓
-
-### #139 / trusted_proxies note
-
-Prod sets `trusted_proxies static 192.168.0.100/24`. With #139 now merged, defender keys IP checks and auto-blocklisting on the **real** client IP (via `ClientIPVarKey`) rather than the proxy's. If a proxy sits in that range, this changes which IP gets blocklisted (for the better). Worth watching the first prod run after deploy.
+Bind-mount the **directory** containing the blocklist, not the file (`os.Rename` → EBUSY otherwise). Prod does this. ✓
 
 ---
 
 ## Build, test, release
 
-Go is **not installed on the host.** Everything runs inside `caddy:builder` (Go + xcaddy pre-installed). On Windows/git-bash, prefix docker runs with `MSYS_NO_PATHCONV=1` so `-w /src` isn't mangled, and use a Windows volume path.
+Go is **not installed on the host.** Everything runs inside `caddy:builder`. Use a named volume for the module cache or every run re-downloads ~300 modules. On Windows/git-bash prefix with `MSYS_NO_PATHCONV=1`. `gofmt -l` flags every file because of CRLF checkout — ignore. `-race` doesn't work in this image (no cgo).
 
 ```bash
-# Build + test
-MSYS_NO_PATHCONV=1 docker run --rm -v "C:/_cloned/caddy-defender:/src" -w /src caddy:builder \
-    sh -c "go build ./... && go test ./..."
+MSYS_NO_PATHCONV=1 docker run --rm -v "C:/_cloned/caddy-defender:/src" -v caddy-defender-gomod:/go/pkg/mod -w /src caddy:builder \
+    sh -c "go vet ./... && go test ./..."
 
-# Production image
-MSYS_NO_PATHCONV=1 docker build -t cechode/caddy-defender:<tag> .
-docker push cechode/caddy-defender:<tag>
-
-# End-to-end validation (Docker Desktop must be running)
 MSYS_NO_PATHCONV=1 docker build -t caddy-defender:autoblocklist-test .
 powershell -ExecutionPolicy Bypass -File localtest\validate.ps1
-```
 
-xcaddy resolves its own module graph and does **not** need a complete `go.sum`, which is why `docker build` works even when host `go build` would not.
+MSYS_NO_PATHCONV=1 docker build -t cechode/caddy-defender:<tag> . && docker push cechode/caddy-defender:<tag>
+```
 
 ---
 
 ## Repo state (end of session)
 
-- Branch: `feature/rate-limiter` (name now a misnomer — feature is `auto_blocklist`; left as-is).
-- Fully merged with `upstream/main` (0 behind). 49 commits ahead of upstream.
-- Working tree clean.
-- Pushed to `origin/feature/rate-limiter` this session.
-- Docker Hub: `cechode/caddy-defender:auto-blocklist-v6` pushed.
+- Branch: `auto-blocklist`. Merge commit `1afa81e` on top; 0 behind upstream.
+- **Uncommitted:** path-signature feature + singleton fix + tests + docs + localtest (12 files). Awaiting user's go-ahead to commit.
+- Not pushed. No new Docker Hub tag yet.
 
 ## Known quirks / future work
 
-In decreasing priority:
-1. **Per-Defender `FileFetcher` duplication.** Each `defender {…}` block gets its own fsnotify watcher; one write fans out to N "reloading" events + N trie rebuilds. The auto-blocklist tracker already solves the equivalent via a singleton + refcount; `FileFetcher` should mirror that. Not worth it below ~30 sites.
-2. **Race in `matchers/ip.IPChecker.UpdateRanges`** under concurrent updates (surfaces under `-race`, test `ConcurrentUpdates`). Pre-existing. Low contention today (one writer per blocklist file); must fix before any singleton refactor of #1.
-3. **Append-only add path** could replace the read-all/rewrite-atomic add with an `O_APPEND` write + in-memory set. Discussed, not done.
-4. **Branch rename.** `feature/rate-limiter` no longer describes the work; consider renaming the branch/eventually merging to `main`.
+1. **Subnet escalation** — June blocklist snapshot: 2779 /32s, heavy clustering (50 each in 66.132.x, 176.65.x). After N /32s from one /24, ban the /24. Not started.
+2. **Per-Defender `FileFetcher` duplication** — N vhosts = N fsnotify watchers + N trie rebuilds per write. Mirror the tracker singleton pattern. Not worth it below ~30 sites.
+3. **Race in `IPChecker.UpdateRanges`** under concurrent updates (pre-existing, low contention). Fix before #2.
+4. **Responder after response already written** — on a status-code threshold hit the responder runs after `next` already wrote headers (pre-existing "Option A"). Harmless with `drop`, produces a superfluous-WriteHeader warning with `block`.

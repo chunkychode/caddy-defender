@@ -8,6 +8,7 @@
     4. Admin API: DELETE /defender/blocklist/{ip} (remove) -> watcher reload, unblocked
     5. Auto-blocklist: exceeding the 404 threshold auto-adds the IP and blocks it
     6. Admin API: GET /defender/auto_blocklist/stats  and  DELETE .../reset/{ip}
+    7. Path signatures: first hit on a configured path bans immediately
 
   Usage:   powershell -ExecutionPolicy Bypass -File localtest\validate.ps1
   Requires: Docker running, image 'caddy-defender:autoblocklist-test' built.
@@ -103,6 +104,20 @@ try {
   Write-Host "`n== 7. auto_blocklist reset endpoint ==" -ForegroundColor Cyan
   $c = Code "$ADMIN/defender/auto_blocklist/reset/$clientIP" 'DELETE'
   Check "reset returns 200" ($c -eq '200') "got $c"
+
+  Write-Host "`n== 8. path signature: first .env probe bans immediately ==" -ForegroundColor Cyan
+  Code "$ADMIN/defender/blocklist/$clientIP" 'DELETE' | Out-Null
+  Start-Sleep 2
+  Check "precondition: unblocked again (200)" ((Code "$SITE/") -eq '200') "got $(Code "$SITE/")"
+  # This path would normally be a 200 (echo), so status-code tracking can't catch it.
+  $c = Code "$SITE/aws/.env"
+  Check "first /aws/.env probe answered by responder (403)" ($c -eq '403') "got $c"
+  Start-Sleep 2
+  $b = Body "$ADMIN/defender/blocklist" | ConvertFrom-Json
+  Check "path hit auto-added our IP to blocklist" ($b.ips -contains $cidr) "ips=$($b.ips -join ',')"
+  Check "subsequent unrelated request blocked (403)" ((Code "$SITE/") -eq '403') "got $(Code "$SITE/")"
+  $stats = Body "$ADMIN/defender/auto_blocklist/stats" | ConvertFrom-Json
+  Check "stats show IP over threshold" ($stats.tracked_ips.$clientIP.exceeds_threshold -eq $true) "tracked=$($stats.tracked_ips.$clientIP | ConvertTo-Json -Compress)"
 }
 finally {
   Write-Host "`n== teardown ==" -ForegroundColor Cyan

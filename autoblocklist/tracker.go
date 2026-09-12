@@ -54,7 +54,8 @@ func NewTracker(config Config, log *zap.Logger) *Tracker {
 		zap.String("tracking_mode", trackingMode),
 		zap.Ints("status_codes", config.StatusCodes),
 		zap.Int("max_requests", config.MaxRequests),
-		zap.Duration("window_duration", config.WindowDuration))
+		zap.Duration("window_duration", config.WindowDuration),
+		zap.Strings("paths", config.Paths))
 
 	return t
 }
@@ -136,6 +137,41 @@ func (t *Tracker) TrackRequest(clientIP net.IP, statusCode int) (exceeded bool, 
 		zap.Int("status_code", statusCode))
 
 	return false, nil
+}
+
+// Config returns the effective configuration (defaults applied) that this
+// tracker was built with. Because the tracker is a process-wide singleton,
+// callers should consult this rather than their own instance's config when
+// deciding what to do on a threshold hit.
+func (t *Tracker) Config() Config {
+	return t.config
+}
+
+// MatchPath reports whether the request path hits a configured path signature.
+func (t *Tracker) MatchPath(path string) (string, bool) {
+	return t.config.MatchPath(path)
+}
+
+// MarkBlocked records that the IP was blocklisted outside the normal
+// status-code counting (e.g. via a path-signature hit). The IP's window is
+// forced over the threshold so that stats report it and a later status-code
+// transition does not fire a duplicate "add to blocklist" action.
+func (t *Tracker) MarkBlocked(clientIP net.IP) {
+	ipStr := clientIP.String()
+	now := time.Now()
+
+	t.mu.Lock()
+	defer t.mu.Unlock()
+
+	window, exists := t.storage[ipStr]
+	if !exists || now.Sub(window.WindowStart) >= t.config.WindowDuration {
+		window = &RequestWindow{WindowStart: now}
+		t.storage[ipStr] = window
+	}
+	if window.Count <= t.config.MaxRequests {
+		window.Count = t.config.MaxRequests + 1
+	}
+	window.Blocked = true
 }
 
 // shouldTrackStatus checks if a status code should be tracked

@@ -64,6 +64,7 @@ var responderTypes = []string{
 //	        window_duration <duration>
 //	        auto_add_to_blocklist
 //	        cleanup_interval <duration>
+//	        paths <signature...>
 //	    }
 //	}
 func (m *Defender) UnmarshalCaddyfile(d *caddyfile.Dispenser) error {
@@ -230,6 +231,14 @@ func (m *Defender) UnmarshalCaddyfile(d *caddyfile.Dispenser) error {
 						return fmt.Errorf("invalid cleanup_interval value: '%s'", d.Val())
 					}
 					m.AutoBlocklistConfig.CleanupInterval = interval
+				case "paths":
+					if !d.NextArg() {
+						return d.ArgErr()
+					}
+					m.AutoBlocklistConfig.Paths = append(m.AutoBlocklistConfig.Paths, d.Val())
+					for d.NextArg() {
+						m.AutoBlocklistConfig.Paths = append(m.AutoBlocklistConfig.Paths, d.Val())
+					}
 				default:
 					return d.Errf("unknown auto_blocklist option: %s", d.Val())
 				}
@@ -326,6 +335,10 @@ func (m *Defender) Validate() error {
 	// Check if the whitelist is valid
 	err := whitelist.Validate(m.Whitelist)
 	if err != nil {
+		return err
+	}
+
+	if err := m.AutoBlocklistConfig.Validate(); err != nil {
 		return err
 	}
 

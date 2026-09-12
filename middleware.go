@@ -66,62 +66,98 @@ func (m Defender) ServeHTTP(w http.ResponseWriter, r *http.Request, next caddyht
 
 	m.log.Debug("Request allowed (IP whitelisted or not in blocked ranges)", zap.String("ip", clientIP.String()))
 
-	// Capture the auto-blocklist tracker tracker pointer once to avoid race conditions
-	// If we check twice, the limiter could be stopped between checks causing nil pointer panic
-	globalAutoBlocklistMu.RLock()
-	tracker := globalAutoBlocklist
-	globalAutoBlocklistMu.RUnlock()
-
-	// Wrap response writer to capture status code for auto-blocklisting
-	var recorder *autoblocklist.ResponseRecorder
-	if tracker != nil {
-		recorder = autoblocklist.NewResponseRecorder(w)
-		w = recorder
+	// Snapshot the global tracker once. If we read it twice, Cleanup could
+	// stop it between reads and we would dereference nil.
+	tracker, fallbackFile := currentAutoBlocklist()
+	if tracker == nil {
+		return next.ServeHTTP(w, r)
 	}
 
-	// IP is allowed, proceed to the next handler
-	err = next.ServeHTTP(w, r)
-
-	// Track the request for auto-blocklisting if enabled
-	// Skip auto-blocklisting for whitelisted IPs
-	if tracker != nil && recorder != nil && !m.ipChecker.IsWhitelisted(clientIP) {
-		exceeded, trackErr := tracker.TrackRequest(clientIP, recorder.StatusCode)
-		if trackErr != nil {
-			m.log.Error("Failed to track request for auto-blocklisting",
-				zap.String("ip", clientIP.String()),
-				zap.Error(trackErr))
-		}
-
-		// If threshold exceeded, add IP to blocklist
-		if exceeded && m.AutoBlocklistConfig.AutoAddToBlocklist {
-			if addErr := m.addIPToBlocklist(clientIP); addErr != nil {
-				m.log.Error("Failed to add IP to blocklist",
-					zap.String("ip", clientIP.String()),
-					zap.Error(addErr))
-			} else {
-				m.log.Info("Threshold exceeded - IP added to blocklist",
-					zap.String("ip", clientIP.String()),
-					zap.String("blocklist_file", m.BlocklistFile),
-					zap.Int("status_code", recorder.StatusCode),
-					zap.Int("max_requests", m.AutoBlocklistConfig.MaxRequests),
-					zap.Duration("window", m.AutoBlocklistConfig.WindowDuration))
-
-				// Block this request immediately (Option A)
-				return m.responder.ServeHTTP(recorder.ResponseWriter, r, next)
-			}
-		}
-	} else if tracker != nil && recorder != nil {
+	// Whitelisted IPs are never auto-blocklisted.
+	if m.ipChecker.IsWhitelisted(clientIP) {
 		m.log.Debug("Skipping auto-blocklisting for whitelisted IP",
 			zap.String("ip", clientIP.String()))
+		return next.ServeHTTP(w, r)
+	}
+
+	// The tracker is a singleton, so its config (not this instance's) decides
+	// whether a violation is written to the blocklist. Otherwise a vhost
+	// without an auto_blocklist block would consume the once-per-window
+	// "exceeded" transition and the IP would never be written by anyone.
+	autoAdd := tracker.Config().AutoAddToBlocklist
+
+	// Path signatures: ban on first sight, before the request reaches the app.
+	// Status-code counting is useless behind an auth proxy that answers every
+	// probe with a 302, so this is the primary defence for those vhosts.
+	if sig, hit := tracker.MatchPath(r.URL.Path); hit {
+		tracker.MarkBlocked(clientIP)
+		if !autoAdd {
+			m.log.Warn("Path signature hit (detect-only, auto_add_to_blocklist disabled)",
+				zap.String("ip", clientIP.String()),
+				zap.String("path", r.URL.Path),
+				zap.String("signature", sig))
+			return next.ServeHTTP(w, r)
+		}
+		if addErr := m.addIPToBlocklist(clientIP, fallbackFile); addErr != nil {
+			m.log.Error("Failed to add IP to blocklist after path signature hit",
+				zap.String("ip", clientIP.String()),
+				zap.String("path", r.URL.Path),
+				zap.Error(addErr))
+			return next.ServeHTTP(w, r)
+		}
+		m.log.Warn("Path signature hit - IP added to blocklist",
+			zap.String("ip", clientIP.String()),
+			zap.String("path", r.URL.Path),
+			zap.String("signature", sig),
+			zap.String("host", r.Host))
+		return m.responder.ServeHTTP(w, r, next)
+	}
+
+	// Wrap response writer to capture status code for auto-blocklisting
+	recorder := autoblocklist.NewResponseRecorder(w)
+
+	// IP is allowed, proceed to the next handler
+	err = next.ServeHTTP(recorder, r)
+
+	exceeded, trackErr := tracker.TrackRequest(clientIP, recorder.StatusCode)
+	if trackErr != nil {
+		m.log.Error("Failed to track request for auto-blocklisting",
+			zap.String("ip", clientIP.String()),
+			zap.Error(trackErr))
+	}
+
+	// If threshold exceeded, add IP to blocklist
+	if exceeded && autoAdd {
+		cfg := tracker.Config()
+		if addErr := m.addIPToBlocklist(clientIP, fallbackFile); addErr != nil {
+			m.log.Error("Failed to add IP to blocklist",
+				zap.String("ip", clientIP.String()),
+				zap.Error(addErr))
+		} else {
+			m.log.Info("Threshold exceeded - IP added to blocklist",
+				zap.String("ip", clientIP.String()),
+				zap.String("host", r.Host),
+				zap.Int("status_code", recorder.StatusCode),
+				zap.Int("max_requests", cfg.MaxRequests),
+				zap.Duration("window", cfg.WindowDuration))
+
+			// Block this request immediately (Option A)
+			return m.responder.ServeHTTP(recorder.ResponseWriter, r, next)
+		}
 	}
 
 	return err
 }
 
-// addIPToBlocklist adds an IP address to the blocklist file (if configured)
-func (m *Defender) addIPToBlocklist(clientIP net.IP) error {
-	if m.BlocklistFile == "" {
-		return fmt.Errorf("blocklist_file not configured")
+// addIPToBlocklist adds an IP address to this instance's blocklist file, or to
+// fallbackFile (the global auto-blocklist file) when this instance has none.
+func (m *Defender) addIPToBlocklist(clientIP net.IP, fallbackFile string) error {
+	file := m.BlocklistFile
+	if file == "" {
+		file = fallbackFile
+	}
+	if file == "" {
+		return fmt.Errorf("blocklist_file not configured on this or any auto_blocklist-enabled defender")
 	}
 
 	// Convert IP to CIDR format
@@ -140,7 +176,7 @@ func (m *Defender) addIPToBlocklist(clientIP net.IP) error {
 		return fmt.Errorf("DefenderAdmin not available")
 	}
 
-	return admin.addIPsToFile(m.BlocklistFile, []string{ipCIDR})
+	return admin.addIPsToFile(file, []string{ipCIDR})
 }
 
 func clientIPFromRequest(r *http.Request) (net.IP, error) {

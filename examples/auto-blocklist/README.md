@@ -63,6 +63,7 @@ defender block {
 |--------|------|---------|-------------|
 | `enabled` | boolean | `false` | Enable/disable auto-blocklisting |
 | `status_codes` | []int | `[404]` | HTTP status codes to track |
+| `paths` | []string | none | Request-path signatures that ban on the first hit regardless of status code. `/`-prefixed entries match as a prefix, others as a case-insensitive substring. |
 | `max_requests` | int | `10` | Maximum requests allowed in window |
 | `window_duration` | duration | `5m` | Detection window for counting requests |
 | `auto_add_to_blocklist` | boolean | `true` | Auto-add violators to blocklist |

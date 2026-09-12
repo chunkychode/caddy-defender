@@ -24,6 +24,8 @@
 			max_requests 5
 			window_duration 10m
 			auto_add_to_blocklist
+			# Path signatures ban on the FIRST hit, regardless of status code.
+			paths .env /wp-admin
 		}
 	}
 
