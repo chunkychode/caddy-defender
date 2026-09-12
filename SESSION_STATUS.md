@@ -71,7 +71,7 @@ The tracker is process-global, but the "write to blocklist" decision used the **
 
 ## Production deployment
 
-- **Latest pushed image:** `cechode/caddy-defender:auto-blocklist-v7` (also tagged `latest`), pushed 2026-09-11, digest `sha256:9e5dda8f9941dcca07c0c801fac96c3dcf29649b81dd672b5092ed27d60ea1e1`. Contains path signatures + singleton fix + validation. Built from the **uncommitted** working tree (see Repo state). Prod was on `auto-blocklist-v6` at session end; deploy is the user's call.
+- **Latest pushed image:** `cechode/caddy-defender:auto-blocklist-v7` (also tagged `latest`), pushed 2026-09-11, digest `sha256:9e5dda8f9941dcca07c0c801fac96c3dcf29649b81dd672b5092ed27d60ea1e1`. Contains path signatures + singleton fix + validation. Source commit `bfa9830`. **Deployed to prod 2026-09-12 05:34Z** — startup log confirmed `paths` loaded (`.env .git/ .php /wp-admin credentials.json service-account key.json`), 8 range keys (openai aws gcloud digitalocean vultr linode oci aliyun), blocklist at 3249 entries, 16 defender instances sharing one tracker singleton.
 
 ### Actual prod `(defme)` snippet (corrected 2026-09-11; previous doc was stale)
 ```caddyfile
@@ -93,6 +93,8 @@ Every vhost imports `alwaysinclude` → `defme`. `fin` and `files` sit behind au
 1. Add `paths .env .git/ wp-login.php xmlrpc.php phpinfo /wp-admin /actuator` to `auto_blocklist`.
 2. Add `gcloud` to `ranges` (34.176.0.0/16 is in the embedded list; would have stopped the observed scanner on request 1). Consider `digitalocean vultr linode oci aliyun huawei` too.
 3. Do **not** add 302 to `status_codes` — an expired-session SPA user fires several 302s in a second and would be permanently banned at threshold 5.
+4. **Consider dropping 400/401 from `status_codes`.** Observed 2026-09-12 05:41Z (a deliberate test by the user from their own phone): 6 wrong Vaultwarden master passwords in 60s (Vaultwarden answers 400) hit `max_requests 5` and banned the IP fleet-wide. User is aware and accepts the trade-off for now. A family member doing the same thing by accident gets the same result. Follow-up requests show `status:0` = `drop` responder. 400/401 are how apps say "wrong input/credentials" to real users; scanners produce 404s. Vaultwarden has its own login rate limiter. Unban: `DELETE /defender/blocklist/<ip>` + `DELETE /defender/auto_blocklist/reset/<ip>` on the admin API.
+5. Possible feature: `auto_blocklist` `ignore_paths` (exclude e.g. `/identity/connect/token` from status-code counting) or per-status thresholds. Not built.
 
 ### Critical bind-mount rule (unchanged)
 Bind-mount the **directory** containing the blocklist, not the file (`os.Rename` → EBUSY otherwise). Prod does this. ✓
