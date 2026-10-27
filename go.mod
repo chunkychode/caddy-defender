@@ -5,9 +5,9 @@ go 1.25.10
 require (
 	github.com/caddyserver/caddy/v2 v2.11.4
 	github.com/fsnotify/fsnotify v1.9.0
-	github.com/gaissmai/bart v0.29.0
+	github.com/gaissmai/bart v0.30.0
 	github.com/stretchr/testify v1.12.1
-	github.com/viccon/sturdyc v1.1.5
+	github.com/viccon/sturdyc v1.1.6
 	go.uber.org/zap v1.28.0
 )
 
