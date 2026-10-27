@@ -1,6 +1,6 @@
 # Caddy-Defender — Status
 
-Primer for picking this repo up cold. Last updated **2026-09-11** at the end of the session that merged upstream (Datadog fetcher, dep bumps), added **path-signature instant banning**, and fixed the singleton auto-add bug.
+Primer for picking this repo up cold. Last updated **2026-10-27** (merged upstream v0.10.2, released image v8). Previous session (2026-09-11) added **path-signature instant banning** and fixed the singleton auto-add bug.
 
 ---
 
@@ -37,12 +37,27 @@ localtest/             Dockerized end-to-end harness (validate.ps1) — 17 check
 
 ---
 
-## This session's work (branch `auto-blocklist`)
+## 2026-10-27 session: upstream merge (committed `52bdbe2`, pushed)
+
+Merged 13 upstream commits (tag `v0.10.2`):
+- **Tarpit security fix** (GHSA-86w8-gf45-vqmq): old `break` inside `select` never exited the loop on client disconnect; now returns on `req.Context().Done()`. Regression test added. Prod uses `drop`, so not exposed.
+- bart 0.29.0 -> 0.30.0, sturdyc 1.1.5 -> 1.1.6. No API breakage for our `matchers/ip/ip.go`.
+- CIDR refreshes (`ranges/data/generated.go`), CI workflow changes.
+- Only conflict: go.mod (our `fsnotify` line, again).
+- Verified: vet + tests green, `validate.ps1` 17/17.
+- Image **`cechode/caddy-defender:auto-blocklist-v8`** (+ `latest`), digest `sha256:4d69b0847266fb0fcfe793d326f687ccf22fcb8943568870cffb8e5652107f1e` (rebuilt with OCI labels). **Not yet deployed to prod.**
+- Added `DOCKERHUB.md` (Hub overview source) and `scripts/release.sh <tag>`: builds with OCI labels (source/revision/url/version), pushes tag + latest, and PATCHes the Hub overview + short description when `DOCKERHUB_TOKEN` (Hub PAT, **Read, Write, Delete** scope; Read/Write gets 403) is set. `DOCKERHUB_ONLY_DESCRIPTION=1` skips build/push. Overview synced 2026-10-27.
+
+Note: auto-mode classifier blocks `-ExecutionPolicy Bypass`; run harness as `& .\localtest\validate.ps1` instead.
+
+---
+
+## 2026-09-11 session work (branch `auto-blocklist`)
 
 ### 1. Merged `upstream/main` (committed: `1afa81e`)
 16 commits: Datadog IP-range fetcher (#153, new `datadog` key), bart 0.28.0→0.29.0, testify 1.11.1→1.12.1, embedded CIDR refreshes. Only conflict was go.mod (our direct `fsnotify` dep, same as last time). 0 behind upstream.
 
-### 2. Path-signature instant ban (UNCOMMITTED at time of writing)
+### 2. Path-signature instant ban (committed `bfa9830`)
 Motivated by a prod log: a GCP box (34.176.41.51) probed `fin.himmelman.family/<vendor>/.env` 19× in 2.7s. Authentik's `forward_auth` answered every probe with a **302**, which isn't a tracked status code, so auto_blocklist never fired. Status-code counting is blind behind an auth proxy.
 
 New `auto_blocklist` sub-option:
@@ -59,7 +74,7 @@ auto_blocklist {
 - **Validation** (`autoblocklist.Config.Validate`, called from `Defender.Validate`): rejects empty/whitespace entries and a bare `/` (would ban every visitor). Verified with `caddy validate` in the built image: bad config fails at load with a clear message.
 - Code: `autoblocklist/config.go` (`Paths`, `MatchPath`), `autoblocklist/tracker.go` (`Config()`, `MatchPath`, `MarkBlocked`), `middleware.go`, `config.go` (`paths` parsing).
 
-### 3. Singleton auto-add bug fix (UNCOMMITTED)
+### 3. Singleton auto-add bug fix (committed `bfa9830`)
 The tracker is process-global, but the "write to blocklist" decision used the **per-vhost** config (`m.AutoBlocklistConfig.AutoAddToBlocklist`, `m.BlocklistFile`). A vhost without an `auto_blocklist {}` block still fed the shared counter, and if the once-per-window "exceeded" transition fired on that vhost, nobody ever wrote the IP. Fixed: decision comes from `tracker.Config()`, and the file falls back to `globalAutoBlocklistFile` (first enabled instance's `blocklist_file`). Regression test: `TestDefenderServeHTTP_AutoAddUsesGlobalConfig`. Not hit in prod today (every vhost imports `defme`), but latent.
 
 ### Verification
@@ -71,7 +86,7 @@ The tracker is process-global, but the "write to blocklist" decision used the **
 
 ## Production deployment
 
-- **Latest pushed image:** `cechode/caddy-defender:auto-blocklist-v7` (also tagged `latest`), pushed 2026-09-11, digest `sha256:9e5dda8f9941dcca07c0c801fac96c3dcf29649b81dd672b5092ed27d60ea1e1`. Contains path signatures + singleton fix + validation. Source commit `bfa9830`. **Deployed to prod 2026-09-12 05:34Z** — startup log confirmed `paths` loaded (`.env .git/ .php /wp-admin credentials.json service-account key.json`), 8 range keys (openai aws gcloud digitalocean vultr linode oci aliyun), blocklist at 3249 entries, 16 defender instances sharing one tracker singleton.
+- **Latest pushed image:** `auto-blocklist-v8` (see top; not deployed). **Running in prod:** `cechode/caddy-defender:auto-blocklist-v7`, pushed 2026-09-11, digest `sha256:9e5dda8f9941dcca07c0c801fac96c3dcf29649b81dd672b5092ed27d60ea1e1`. Contains path signatures + singleton fix + validation. Source commit `bfa9830`. **Deployed to prod 2026-09-12 05:34Z** — startup log confirmed `paths` loaded (`.env .git/ .php /wp-admin credentials.json service-account key.json`), 8 range keys (openai aws gcloud digitalocean vultr linode oci aliyun), blocklist at 3249 entries, 16 defender instances sharing one tracker singleton.
 
 ### Actual prod `(defme)` snippet (corrected 2026-09-11; previous doc was stale)
 ```caddyfile
@@ -112,16 +127,15 @@ MSYS_NO_PATHCONV=1 docker run --rm -v "C:/_cloned/caddy-defender:/src" -v caddy-
 MSYS_NO_PATHCONV=1 docker build -t caddy-defender:autoblocklist-test .
 powershell -ExecutionPolicy Bypass -File localtest\validate.ps1
 
-MSYS_NO_PATHCONV=1 docker build -t cechode/caddy-defender:<tag> . && docker push cechode/caddy-defender:<tag>
+bash scripts/release.sh <tag>    # build + labels + push tag & latest (+ Hub overview if DOCKERHUB_TOKEN set)
 ```
 
 ---
 
 ## Repo state (end of session)
 
-- Branch: `auto-blocklist`. Merge commit `1afa81e` on top; 0 behind upstream.
-- **Uncommitted:** path-signature feature + singleton fix + tests + docs + localtest (12 files). Awaiting user's go-ahead to commit.
-- Not pushed. No new Docker Hub tag yet.
+- Branch: `auto-blocklist`, pushed to origin. Merge commit `52bdbe2` on top; 0 behind upstream (`v0.10.2`).
+- Clean working tree (besides this file).
 
 ## Known quirks / future work
 
